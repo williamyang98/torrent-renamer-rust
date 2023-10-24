@@ -49,11 +49,13 @@ pub fn get_descriptor(filename: &str) -> Option<FileDescriptor> {
 
 pub fn clean_series_name(value: &str) -> String {
     lazy_static! {
+        static ref TAG_REGEX: Regex = Regex::new(r"[\[\(]([a-zA-Z0-9]{2,})[\]\)]").unwrap();
         static ref REMOVE_REGEX: Regex = Regex::new(r"[',\(\)\[\]]").unwrap();
         static ref REPLACE_REGEX: Regex = Regex::new(r"[^a-zA-Z0-9]+").unwrap();
     }
     
-    let mut new_value: String = REMOVE_REGEX.replace_all(value, "").to_string();
+    let mut new_value: String = TAG_REGEX.replace_all(value, "").to_string();
+    new_value = REMOVE_REGEX.replace_all(new_value.as_str(), "").to_string();
     new_value = REPLACE_REGEX.replace_all(new_value.as_str(), " ").to_string();
     new_value = new_value.trim().replace(" ", ".").to_string();
     new_value

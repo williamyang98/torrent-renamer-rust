@@ -1,3 +1,4 @@
+use async_recursion;
 use anyhow;
 use futures;
 use serde_json;
@@ -10,18 +11,16 @@ use tvdb::api::{LoginSession, ApiError};
 use walkdir;
 use std::path;
 use tokio;
+use enum_map;
+use crate::app_folder_cache::{EpisodeKey, AppFolderCache};
 use crate::file_intent::{FilterRules, Action, get_file_intent};
-use crate::episode_cache::{EpisodeKey, EpisodeCache, get_episode_cache};
 
 const PATH_STR_BOOKMARKS: &str = "bookmarks.json";
 const PATH_STR_EPISODES_DATA: &str = "episodes.json";
 const PATH_STR_SERIES_DATA: &str = "series.json";
 
 #[derive(Debug, thiserror::Error)]
-pub enum CacheSaveError {
-    SeriesNotLoaded,
-    EpisodesNotLoaded,
-}
+pub struct CacheSaveError; 
 
 impl fmt::Display for CacheSaveError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -34,6 +33,7 @@ impl fmt::Display for CacheSaveError {
 pub struct ConflictTable {
     pending_writes: HashMap<String, HashSet<usize>>,
     existing_sources: HashMap<String, usize>,
+    action_count: enum_map::EnumMap<Action, usize>,
 }
 
 pub struct AppFile {
@@ -60,9 +60,7 @@ pub struct AppFileContext<'a> {
 pub struct AppFolder<'a> {
     root_path: String,
     filter_rules: &'a FilterRules,
-    series_data: Option<Series>,
-    episodes_data: Option<Vec<Episode>>,
-    episode_cache: Option<EpisodeCache>,
+    cache: Option<AppFolderCache>,
 
     file_table: Vec<AppFile>,
     conflict_table: ConflictTable,
@@ -75,6 +73,7 @@ impl ConflictTable {
         Self {
             pending_writes: HashMap::new(),
             existing_sources: HashMap::new(),
+            action_count: enum_map::enum_map!{ _ => 0 },
         }
     }
 
@@ -122,6 +121,10 @@ impl ConflictTable {
     pub fn get_source_index(&self, src: &str) -> Option<&usize> {
         self.existing_sources.get(src)
     }
+
+    pub fn get_action_count(&self) -> &enum_map::EnumMap<Action, usize> {
+        &self.action_count
+    }
 }
 
 impl<'a> AppFolder<'a> {
@@ -131,9 +134,7 @@ impl<'a> AppFolder<'a> {
         Self {
             root_path: root_path.to_string(),
             filter_rules,
-            series_data: None,
-            episodes_data: None,
-            episode_cache: None,
+            cache: None,
 
             file_table: Vec::new(),
             conflict_table: ConflictTable::new(),
@@ -142,56 +143,53 @@ impl<'a> AppFolder<'a> {
     }
 }
 
-impl AppFolder<'_> {
-    pub fn update_file_intents(&mut self) -> bool {
-        let series = match &self.series_data {
-            Some(series) => series,
-            None => return false,
-        };
-
-        let episodes = match &self.episodes_data {
-            Some(episodes) => episodes,
-            None => return false,
-        };
-
-        let episode_cache = match &self.episode_cache {
-            Some(cache) => cache,
-            None => return false,
-        };
-
-        self.file_table.clear();
-        self.conflict_table.clear();
-        self.change_queue.borrow_mut().clear();
-
-        let walker = walkdir::WalkDir::new(self.root_path.as_str())
-            .follow_links(false); // Don't follow symbolic links
-        for entry_res in walker {
-            let entry = match &entry_res {
-                Ok(entry) => entry,
-                Err(_) => continue,
+#[async_recursion::async_recursion]
+async fn recursive_search_file_intents(root_path: &str, curr_folder: &str, cache: &AppFolderCache, intents: &mut Vec<AppFile>, rules: &FilterRules) -> Result<(), anyhow::Error> {
+    let mut entries = tokio::fs::read_dir(curr_folder).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        let file_type = entry.file_type().await?;
+        if file_type.is_dir() {
+            let path = entry.path();
+            if let Some(sub_folder) = path.to_str() {
+                recursive_search_file_intents(root_path, sub_folder, cache, intents, rules).await?;
             };
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let rel_path = match entry.path().strip_prefix(self.root_path.as_str()) {
-                Ok(path) => path,
-                Err(_) => continue,
-            };
-            if let Some(path) = rel_path.to_str() {
-                let intent = get_file_intent(path, &self.filter_rules, series, episodes.as_slice(), episode_cache);
+            continue;
+        }
+
+        if file_type.is_file() {
+            let path = entry.path();
+            let rel_path = path.strip_prefix(root_path)?;
+            if let Some(rel_path) = rel_path.to_str() {
+                let intent = get_file_intent(rel_path, rules, cache);
                 let app_file = AppFile::new(
-                    path,
+                    rel_path,
                     intent.descriptor,
                     intent.action,
                     intent.dest.as_str(),
                 );
-                self.file_table.push(app_file);
+                intents.push(app_file);
             }
+            continue;
         }
+    }
+    Ok(())
+}
+
+impl AppFolder<'_> {
+    pub async fn update_file_intents(&mut self) -> Result<(), anyhow::Error>{
+        let cache = self.cache.as_ref().ok_or(CacheSaveError)?;
+        let mut new_file_table = Vec::<AppFile>::new();
+        recursive_search_file_intents(self.root_path.as_str(), self.root_path.as_str(), cache, &mut new_file_table, &self.filter_rules).await?;
+
+        // TODO: LOCK HERE
+        self.file_table = new_file_table;
+        self.conflict_table.clear();
+        self.change_queue.borrow_mut().clear();
 
         // seed conflict table
         for (index, file) in self.file_table.iter().enumerate() {
             self.conflict_table.insert_existing_source(file.src.as_str(), index);
+            self.conflict_table.action_count[file.action] += 1usize;
         }
 
         // automatically enable renames
@@ -202,72 +200,58 @@ impl AppFolder<'_> {
                 }
             }
         }
-
-        self.flush_file_changes();
-        true
+        Ok(())
     }
 
     pub async fn load_cache_from_file(&mut self) -> Result<(), anyhow::Error> {
+        let (series_data, episodes_data) = tokio::join!(
+            tokio::fs::read_to_string(format!("{}/{}", self.root_path, PATH_STR_SERIES_DATA)),
+            tokio::fs::read_to_string(format!("{}/{}", self.root_path, PATH_STR_EPISODES_DATA))
+        );
+
         let series: Series = {
-            let data = tokio::fs::read_to_string(format!("{}/{}", self.root_path, PATH_STR_SERIES_DATA)).await?;
-            serde_json::from_str(data.as_str())?
+            serde_json::from_str(series_data?.as_str())?
         };
 
         let episodes: Vec<Episode> = {
-            let data = tokio::fs::read_to_string(format!("{}/{}", self.root_path, PATH_STR_EPISODES_DATA)).await?;
-            serde_json::from_str(data.as_str())?
+            serde_json::from_str(episodes_data?.as_str())?
         };
 
-        self.series_data = Some(series);
-        self.episode_cache = Some(get_episode_cache(episodes.as_slice()));
-        self.episodes_data = Some(episodes);
+        // TODO: LOCK HERE
+        self.cache = Some(AppFolderCache::new(series, episodes));
         Ok(())
     }
 
     pub async fn load_cache_from_api(&mut self, session: &LoginSession<'_>, series_id: u32) -> Result<(), ApiError> {
-        let series = session.get_series(series_id).await?;        
-        let episodes = session.get_episodes(series_id).await?;
+        let (series, episodes) = tokio::join!(
+            session.get_series(series_id),
+            session.get_episodes(series_id),
+        );
 
-        self.series_data = Some(series);
-        self.episode_cache = Some(get_episode_cache(episodes.as_slice()));
-        self.episodes_data = Some(episodes);
+        let series = series?;
+        let episodes = episodes?;
+
+        // TODO: LOCK HERE
+        self.cache = Some(AppFolderCache::new(series, episodes));
         Ok(())
     }
 
     pub async fn save_cache_to_file(&self) -> Result<(), anyhow::Error> {
-        let series = self.series_data.as_ref().ok_or(CacheSaveError::SeriesNotLoaded)?;
-        let episodes = self.episodes_data.as_ref().ok_or(CacheSaveError::EpisodesNotLoaded)?;
-
-        let series_str = serde_json::to_string_pretty(series)?;
-        tokio::fs::write(format!("{}/{}", self.root_path, PATH_STR_SERIES_DATA), series_str).await?;
-
-        let episodes_str = serde_json::to_string_pretty(episodes)?;
-        tokio::fs::write(format!("{}/{}", self.root_path, PATH_STR_EPISODES_DATA), episodes_str).await?;
+        // TODO: LOCK HERE
+        let cache = self.cache.as_ref().ok_or(CacheSaveError)?;
+        let series_str = serde_json::to_string_pretty(&cache.series)?;
+        let episodes_str = serde_json::to_string_pretty(&cache.episodes)?;
+        // TODO: UNLOCK HERE
+        
+        tokio::try_join!(
+            tokio::fs::write(format!("{}/{}", self.root_path, PATH_STR_SERIES_DATA), series_str),
+            tokio::fs::write(format!("{}/{}", self.root_path, PATH_STR_EPISODES_DATA), episodes_str),
+        )?;
         
         Ok(())
     }
-    
-    pub fn get_conflict_table(&self) -> &ConflictTable {
-        &self.conflict_table
-    }
 
-    pub fn get_total_files(&self) -> usize {
-        self.file_table.len()
-    }
-    
-    pub fn get_file(&self, index: usize) -> Option<AppFileContext<'_>> {
-        let file = match self.file_table.get(index) {
-            None => return None,
-            Some(file) => file,
-        };
-
-        Some(AppFileContext {
-            index,
-            file,
-            folder: self,
-        })
-    }
-
+    // NOTE: This should be done in UI thread after each frame
     pub fn flush_file_changes(&mut self) -> usize {
         let mut total_changes: usize = 0;
         for file_change in self.change_queue.borrow().iter() {
@@ -286,6 +270,9 @@ impl AppFolder<'_> {
                     if old_action == new_action {
                         continue;
                     }
+
+                    self.conflict_table.action_count[old_action] -= 1usize;
+                    self.conflict_table.action_count[new_action] += 1usize;
 
                     if !file.is_enabled {
                         continue;
@@ -365,8 +352,8 @@ impl AppFolder<'_> {
         use std::future::Future;
         type F = Pin<Box<dyn Future<Output = Result<(), std::io::Error>>>>;
 
+        // TODO: LOCK HERE
         let mut tasks = Vec::<F>::new();
-
         for file_index in 0..self.get_total_files() {
             if let Some(file) = self.get_file(file_index) {
                 if !file.get_is_enabled() {
@@ -397,9 +384,11 @@ impl AppFolder<'_> {
                 }
             }
         }
+        // TODO: UNLOCK
 
         for res in futures::future::join_all(tasks).await.into_iter() {
             if let Err(err) = res {
+                // TODO: Error logging
                 println!("{:?}", err);
             };
         }
@@ -436,9 +425,27 @@ impl AppFolder<'_> {
 
         for res in futures::future::join_all(tasks).await.into_iter() {
             if let Err(err) = res {
+                // TODO: Error logging
                 println!("{:?}", err);
             };
         }
+    }
+
+    pub fn get_conflict_table(&self) -> &ConflictTable {
+        &self.conflict_table
+    }
+
+    pub fn get_total_files(&self) -> usize {
+        self.file_table.len()
+    }
+    
+    pub fn get_file(&self, index: usize) -> Option<AppFileContext<'_>> {
+        let file = self.file_table.get(index)?;
+        Some(AppFileContext {
+            index,
+            file,
+            folder: self,
+        })
     }
 
     fn check_folder_empty(&self, path: &path::Path) -> bool {
@@ -495,30 +502,19 @@ impl AppFileContext<'_> {
     }
 
     pub fn get_episode(&self) -> Option<&Episode> {
-        let descriptor = match &self.file.src_descriptor {
-            Some(data) => data,
-            None => return None,
-        };
-        let episode_cache = match &self.folder.episode_cache {
-            Some(data) => data,
-            None => return None,
-        };
-        let episodes = match &self.folder.episodes_data {
-            Some(data) => data,
-            None => return None,
-        };
-
-        let episode_index = match episode_cache.get(descriptor) {
-            Some(data) => *data,
-            None => return None,
-        };
-
-        episodes.get(episode_index)
+        let descriptor = self.file.src_descriptor.as_ref()?;
+        let cache = self.folder.cache.as_ref()?;
+        let episode_index = *cache.episode_cache.get(descriptor)?;
+        cache.episodes.get(episode_index)
     }
 
     pub fn set_action(&mut self, new_action: Action) {
-        let change = AppFileChange::SetAction(self.index, new_action);
-        self.folder.change_queue.borrow_mut().push(change);
+        let mut queue = self.folder.change_queue.borrow_mut();
+        queue.push(AppFileChange::SetAction(self.index, new_action));
+        // Automatically set destination to src is not set
+        if self.file.action != Action::Rename && new_action == Action::Rename && self.file.dest.len() == 0 {
+            queue.push(AppFileChange::SetDest(self.index, self.file.src.to_owned())); 
+        }
     }
 
     pub fn set_is_enabled(&mut self, new_is_enabled: bool) {

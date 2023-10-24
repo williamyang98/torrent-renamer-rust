@@ -1,10 +1,11 @@
-use crate::episode_cache::{EpisodeKey, EpisodeCache};
+use crate::app_folder_cache::{EpisodeKey, AppFolderCache};
 use tvdb::models::{Episode, Series};
 use crate::file_descriptor::{get_descriptor, clean_episode_title, clean_series_name};
+use enum_map;
 use std::path::Path;
 use serde;
 
-#[derive(Debug, Eq, PartialEq, Copy, Clone)]
+#[derive(Debug, Eq, PartialEq, Copy, Clone, enum_map::Enum)]
 pub enum Action {
     Rename,
     Complete,
@@ -28,7 +29,7 @@ pub struct FilterRules {
     pub whitelist_tags: Vec<String>,
 }
 
-pub fn get_file_intent(path_str: &str, rules: &FilterRules, series: &Series, episodes: &[Episode], episode_cache: &EpisodeCache) -> FileIntent {
+pub fn get_file_intent(path_str: &str, rules: &FilterRules, cache: &AppFolderCache) -> FileIntent {
     let mut intent = FileIntent {
         action: Action::Ignore,
         dest: "".to_string(),
@@ -86,13 +87,20 @@ pub fn get_file_intent(path_str: &str, rules: &FilterRules, series: &Series, epi
     intent.descriptor = Some(episode_key);
 
     // create new filename
-    let new_episode_title = match episode_cache.get(&episode_key) {
+    let new_episode_title = match cache.episode_cache.get(&episode_key) {
         None => "".to_string(),
         Some(index) => {
-            let episode = &episodes[*index];
+            let episode = &cache.episodes[*index];
             match &episode.name {
                 None => "".to_string(),
-                Some(name) => format!("-{}", clean_episode_title(name.as_str()).as_str()),
+                Some(name) => {
+                    let clean_name = clean_episode_title(name.as_str());
+                    if clean_name.len() == 0 {
+                        "".to_string()
+                    } else {
+                        format!("-{}", clean_name.as_str())
+                    }
+                },
             }
         },
     };
@@ -105,7 +113,7 @@ pub fn get_file_intent(path_str: &str, rules: &FilterRules, series: &Series, epi
 
     let new_filename = format!(
         "{}-S{:02}E{:02}{}{}.{}", 
-        clean_series_name(series.name.as_str()).as_str(), 
+        clean_series_name(cache.series.name.as_str()).as_str(), 
         descriptor.season, descriptor.episode, 
         new_episode_title.as_str(),
         tags_string.as_str(),
