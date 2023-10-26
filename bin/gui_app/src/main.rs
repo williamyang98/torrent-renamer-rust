@@ -134,18 +134,16 @@ fn render_files_basic_list(
                 if action != selected_action {
                     continue;
                 }
-                ui.horizontal(|ui| {
-                    let descriptor = files.get_src_descriptor(index);
-                    let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                    let src = files.get_src(index);
-                    if ui.selectable_label(is_selected, src).clicked() {
-                        if is_selected {
-                            *folder.get_selected_descriptor().blocking_write() = None;
-                        } else {
-                            *folder.get_selected_descriptor().blocking_write() = *descriptor;
-                        }
+                let descriptor = files.get_src_descriptor(index);
+                let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                let src = files.get_src(index);
+                if ui.selectable_label(is_selected, src).clicked() {
+                    if is_selected {
+                        *folder.get_selected_descriptor().blocking_write() = None;
+                    } else {
+                        *folder.get_selected_descriptor().blocking_write() = *descriptor;
                     }
-                });
+                }
             }
         });
     });
@@ -170,7 +168,6 @@ fn render_files_rename_list(
             let mut table = TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
-                .max_scroll_height(f32::INFINITY)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
                 .column(Column::auto())
                 .column(Column::auto().clip(true))
@@ -265,7 +262,6 @@ fn render_files_conflicts_list(
                     let mut table = TableBuilder::new(ui)
                         .striped(true)
                         .resizable(true)
-                        .max_scroll_height(f32::INFINITY)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
                         .column(Column::auto())
                         .column(Column::auto().clip(true))
@@ -447,10 +443,8 @@ fn render_folder_controls(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut eg
                 folder.update_file_intents().await
             });
         };
-
-        if ui.button("Search series").clicked() {
-            gui.show_series_search = true;
-        };
+        
+        ui.toggle_value(&mut gui.show_series_search, "Search series");
     });
 }
 
@@ -478,6 +472,8 @@ fn render_folder_info(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::
             render_series_table(&cache.series, ui, ctx);
         });
     });
+
+    ui.separator();
 
     ui.heading("Episode");
     let descriptor = *folder.get_selected_descriptor().blocking_read(); 
@@ -562,14 +558,6 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
             render_errors_list(gui, &folder, ui, ctx);
         });
 
-    egui::SidePanel::left("folder_file_list")
-        .resizable(true)
-        .show_inside(ui, |ui| {
-            ui.add_enabled_ui(is_not_busy, |ui| {
-                render_files_list(gui, &folder, ui, ctx);
-            });
-        });
-
     egui::SidePanel::right("folder_info")
         .resizable(true)
         .show_inside(ui, |ui| {
@@ -577,7 +565,11 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
         });
 
     egui::CentralPanel::default()
-        .show_inside(ui, |ui| {});
+        .show_inside(ui, |ui| {
+            ui.add_enabled_ui(is_not_busy, |ui| {
+                render_files_list(gui, &folder, ui, ctx);
+            });
+        });
 }
 
 fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
@@ -606,14 +598,14 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         ui.with_layout(layout, |ui| {
             let selected_index = *gui.app.get_selected_folder_index().blocking_read();
             for (index, folder) in folders.iter().enumerate() {
-                let is_selected = selected_index == Some(index);
                 let label = format!("{}", folder.get_folder_name());
-                if ui.selectable_label(is_selected, label).clicked() {
+                let mut is_selected = selected_index == Some(index);
+                if ui.toggle_value(&mut is_selected, label).clicked() {
                     let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
                     if !is_selected {
-                        *selected_index = Some(index);
-                    } else {
                         *selected_index = None;
+                    } else {
+                        *selected_index = Some(index);
                     }
                 }
             }
@@ -654,12 +646,10 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         let mut table = TableBuilder::new(ui)
             .striped(true)
             .resizable(true)
-            .max_scroll_height(f32::INFINITY)
             .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
             .column(Column::auto().clip(true))
-            .column(Column::auto().clip(true))
-            .column(Column::auto().clip(true))
-            .column(Column::auto().clip(true))
+            .column(Column::auto())
+            .column(Column::auto())
             .column(Column::auto());
 
         table
@@ -667,7 +657,6 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
                 header.col(|ui| { ui.strong("Name"); });
                 header.col(|ui| { ui.strong("Status"); });
                 header.col(|ui| { ui.strong("First Aired"); });
-                header.col(|ui| { ui.strong("Genre"); });
                 header.col(|ui| { ui.strong(""); });
             })
             .body(|mut body| {
@@ -693,13 +682,6 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
                             ui.label(label);
                         });
                         row.col(|ui| {
-                            let label = match &entry.genre {
-                                None => "Unknown".to_string(),
-                                Some(genres) => genres.join(","),
-                            };
-                            ui.label(label.as_str());
-                        });
-                        row.col(|ui| {
                             if ui.button("Select").clicked() {
                                 gui.runtime.spawn({
                                     let entry_id = entry.id;
@@ -718,114 +700,75 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
 }
 
 fn render_series_table(series: &Series, ui: &mut egui::Ui, _ctx: &egui::Context) {
-    use egui_extras::{Column, TableBuilder};
-    let row_height = 18.0;
-    let mut table = TableBuilder::new(ui)
+    egui::Grid::new("series_table")
+        .num_columns(2)
         .striped(true)
-        .resizable(true)
-        .max_scroll_height(f32::INFINITY)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto())
-        .column(Column::auto());
-    
-    table
-        .header(row_height, |mut header| {
-            header.col(|ui| { ui.strong("Field"); });
-            header.col(|ui| { ui.strong("Value"); });
-        })
-        .body(|mut body| {
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("ID"); });
-                row.col(|ui| { ui.label(format!("{}", series.id)); });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Name"); });
-                row.col(|ui| { 
-                    let label = format!("{}", series.name.as_str());
-                    let gui_label = egui::Label::new(label).wrap(true);
-                    ui.add(gui_label);
-                });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Status"); });
-                row.col(|ui| { 
-                    let label = series.status.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                    ui.label(label);
-                });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Air date"); });
-                row.col(|ui| { 
-                    let label = series.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                    ui.label(label);
-                });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Genre"); });
-                row.col(|ui| { 
-                    let label = match &series.genre {
-                        None => "Unknown".to_string(),
-                        Some(genres) => genres.join(","),
-                    };
-                    let gui_label = egui::Label::new(label).wrap(true);
-                    ui.add(gui_label);
-                });
-            });
-            body.row(150.0, |mut row| {
-                row.col(|ui| { ui.strong("Overview"); });
-                row.col(|ui| { 
-                    let label = series.overview.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                    let gui_label = egui::Label::new(label).wrap(true);
-                    ui.add(gui_label);
-                });
-            });
+        .show(ui, |ui| {
+            ui.strong("ID");
+            ui.label(format!("{}", series.id));
+            ui.end_row();
+
+            ui.strong("Name");
+            let label = format!("{}", series.name.as_str());
+            let gui_label = egui::Label::new(label).wrap(true);
+            ui.add(gui_label);
+            ui.end_row();
+
+            ui.strong("Status");
+            let label = series.status.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            ui.label(label);
+            ui.end_row();
+
+            ui.strong("Air date");
+            let label = series.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            ui.label(label);
+            ui.end_row();
+
+            ui.strong("Genre");
+            let label = match &series.genre {
+                None => "Unknown".to_string(),
+                Some(genres) => genres.join(","),
+            };
+            let gui_label = egui::Label::new(label).wrap(true);
+            ui.add(gui_label);
+            ui.end_row();
+
+            ui.strong("Overview");
+            let label = series.overview.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let gui_label = egui::Label::new(label).wrap(true);
+            ui.add(gui_label);
+            ui.end_row();
         });
 }
 
 fn render_episode_table(episode: &Episode, ui: &mut egui::Ui, _ctx: &egui::Context) {
-    use egui_extras::{Column, TableBuilder};
-    let row_height = 18.0;
-    let mut table = TableBuilder::new(ui)
+    egui::Grid::new("episode_table")
+        .num_columns(2)
         .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto())
-        .column(Column::auto());
-    
-    table
-        .header(row_height, |mut header| {
-            header.col(|ui| { ui.strong("Field"); });
-            header.col(|ui| { ui.strong("Value"); });
-        })
-        .body(|mut body| {
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("ID"); });
-                row.col(|ui| { ui.label(format!("{}", episode.id)); });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Index"); });
-                row.col(|ui| { ui.label(format!("S{:02}E{:02}", episode.season, episode.episode)); });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Name"); });
-                row.col(|ui| { ui.label(episode.name.as_ref().map(|x| x.as_str()).unwrap_or("None")); });
-            });
-            body.row(row_height, |mut row| {
-                row.col(|ui| { ui.strong("Air date"); });
-                row.col(|ui| { 
-                    let label = episode.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                    ui.label(label);
-                });
-            });
-            body.row(150.0, |mut row| {
-                row.col(|ui| { ui.strong("Overview"); });
-                row.col(|ui| { 
-                    let label = episode.overview.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                    let gui_label = egui::Label::new(label).wrap(true);
-                    ui.add(gui_label);
-                });
-            });
-    });
+        .show(ui, |ui| {
+            ui.strong("ID");
+            ui.label(format!("{}", episode.id));
+            ui.end_row();
+
+            ui.strong("Index");
+            ui.label(format!("S{:02}E{:02}", episode.season, episode.episode));
+            ui.end_row();
+
+            ui.strong("Name");
+            ui.label(episode.name.as_ref().map(|x| x.as_str()).unwrap_or("None"));
+            ui.end_row();
+
+            ui.strong("Air date"); 
+            let label = episode.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            ui.label(label);
+            ui.end_row();
+
+            ui.strong("Overview");
+            let label = episode.overview.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let gui_label = egui::Label::new(label).wrap(true);
+            ui.add(gui_label);
+            ui.end_row();
+        });
 }
 
 fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
@@ -844,7 +787,10 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &e
 
     let series = match series.as_ref() {
         Some(series) => series,
-        None => return,
+        None => {
+            ui.label("No series information");
+            return;
+        },
     };
 
     let selected_index = *gui.app.get_selected_series_index().blocking_read();
@@ -864,16 +810,17 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &e
             return;
         },
     };
-
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        render_series_table(series, ui, _ctx);
-    });
     
+    ui.push_id("series_search_info_table", |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            render_series_table(series, ui, _ctx);
+        });
+    });
 }
 
 fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     egui::TopBottomPanel::top("search_bar")
-        .resizable(false)
+        .resizable(true)
         .show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 let res = ui.text_edit_singleline(&mut gui.series_search);
@@ -893,17 +840,16 @@ fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context
 
     egui::SidePanel::right("search_series_info")
         .resizable(true)
+        .default_width(120.0)
+        .min_width(80.0)
         .show_inside(ui, |ui| {
             render_series_search_info_panel(gui, ui, ctx); 
         });
 
-    egui::SidePanel::left("search_results")
+    egui::CentralPanel::default()
         .show_inside(ui, |ui| {
             render_series_search_list(gui, ui, ctx);
         });
-
-    egui::CentralPanel::default()
-        .show_inside(ui, |ui| {});
 }
 
 impl eframe::App for GuiApp {
@@ -917,21 +863,18 @@ impl eframe::App for GuiApp {
 
         egui::CentralPanel::default()
             .show(ctx, |ui| {
-                egui::Window::new("Folder")
-                    .collapsible(false)
-                    .show(ctx, |ui| {
-                        render_folder_panel(self, ui, ctx);
-                    });
-
-                let mut is_open = self.show_series_search;
-                egui::Window::new("Series Search")
-                    .collapsible(false)
-                    .open(&mut is_open)
-                    .show(ctx, |ui| {
-                        render_series_search(self, ui, ctx);
-                    });
-                self.show_series_search = is_open;
+                render_folder_panel(self, ui, ctx);
             });
+
+        let mut is_open = self.show_series_search;
+        egui::Window::new("Series Search")
+            .collapsible(false)
+            .vscroll(false)
+            .open(&mut is_open)
+            .show(ctx, |ui| {
+                render_series_search(self, ui, ctx);
+            });
+        self.show_series_search = is_open;
     }
 }
 
