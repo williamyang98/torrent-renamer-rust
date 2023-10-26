@@ -1,5 +1,4 @@
 use crate::app_folder_cache::{EpisodeKey, AppFolderCache};
-use tvdb::models::{Episode, Series};
 use crate::file_descriptor::{get_descriptor, clean_episode_title, clean_series_name};
 use enum_map;
 use std::path::Path;

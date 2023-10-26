@@ -37,8 +37,8 @@ pub fn get_descriptor(filename: &str) -> Option<FileDescriptor> {
         if let Some(res) = re.captures(filename) {
             return Some(FileDescriptor {
                 title: res[1].to_string(),
-                season: res[2].parse().unwrap(),
-                episode: res[3].parse().unwrap(),
+                season: res[2].parse().unwrap_or(0),
+                episode: res[3].parse().unwrap_or(0),
                 tags: find_tags(&res[4]),
                 extension: res[5].to_string(),
             });

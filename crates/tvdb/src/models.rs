@@ -6,9 +6,21 @@ pub struct Series {
     #[serde(rename="seriesName")]
     pub name: String,
     #[serde(rename="firstAired")]
-    pub first_aired: String,
-    pub status: String,
+    pub first_aired: Option<String>,
+    pub status: Option<String>,
     pub overview: Option<String>,
+
+    pub aliases: Option<Vec<String>>,
+    pub poster: Option<String>,
+    pub banner: Option<String>,
+    pub fanart: Option<String>,
+    pub network: Option<String>,
+    pub genre: Option<Vec<String>>,
+    #[serde(rename="lastUpdated")]
+    pub last_updated: Option<u32>,
+    pub rating: Option<String>,
+    pub slug: Option<String>,
+    pub language: Option<String>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
@@ -23,5 +35,10 @@ pub struct Episode {
     #[serde(rename="episodeName")]
     pub name: Option<String>,
     pub overview: Option<String>,
+
+    pub writers: Option<Vec<String>>,
+    pub directors: Option<Vec<String>>,
+    #[serde(rename="contentRating")]
+    pub rating: Option<String>,
 }
 

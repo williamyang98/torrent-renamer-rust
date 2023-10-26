@@ -3,7 +3,7 @@ use reqwest;
 use serde;
 use serde_json;
 use futures;
-use std::fmt;
+use std::sync::Arc;
 use thiserror;
 
 use crate::models::{Series, Episode};
@@ -24,9 +24,14 @@ struct ErrorBody {
 
 #[derive(Debug, thiserror::Error)]
 pub enum ApiError {
+    #[error("request failure: {}", .0)]
     RequestFailure(reqwest::Error),
+    #[error("unexpected response: code={} body={}", .0, .1)]
     UnexpectedResponse(reqwest::StatusCode, String),
-    JSON(serde_json::Error),
+    #[error("json encode error: {}", .0)]
+    JsonEncode(serde_json::Error),
+    #[error("json decode error: {}", .0)]
+    JsonDecode(serde_json::Error),
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -43,8 +48,8 @@ pub struct LoginToken {
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct EpisodesPageLinks {
-    next: u32,
-    last: u32,
+    next: Option<u32>,
+    last: Option<u32>,
 }
 
 #[derive(serde::Deserialize, Debug, Clone)]
@@ -54,8 +59,8 @@ struct EpisodesPage {
     links: Option<EpisodesPageLinks>,    
 }
 
-pub struct LoginSession<'a> {
-    client: &'a reqwest::Client,
+pub struct LoginSession {
+    client: Arc<reqwest::Client>,
     token: LoginToken,
 }
 
@@ -63,7 +68,7 @@ pub async fn login(client: &reqwest::Client, login_info: &LoginInfo) -> Result<L
     let res = client
         .post(format!("{}/login", BASE_URL))
         .header("Content-Type", "application/json")
-        .body(serde_json::to_string(login_info).unwrap())
+        .body(serde_json::to_string(login_info).map_err(ApiError::JsonEncode)?)
         .send()
         .await
         .map_err(ApiError::RequestFailure)?;
@@ -79,14 +84,12 @@ pub async fn login(client: &reqwest::Client, login_info: &LoginInfo) -> Result<L
         return Err(ApiError::UnexpectedResponse(status, error));
     };
 
-    let session: LoginToken = serde_json::from_str(body.as_str()).map_err(ApiError::JSON)?; 
+    let session: LoginToken = serde_json::from_str(body.as_str()).map_err(ApiError::JsonDecode)?; 
     Ok(session)
 }
 
-impl<'a> LoginSession<'a> {
-    pub fn new<'b>(client: &'b reqwest::Client, token: &LoginToken) -> Self 
-    where 'b: 'a 
-    {
+impl LoginSession {
+    pub fn new<'b>(client: Arc<reqwest::Client>, token: &LoginToken) -> Self {
         Self {
             client,
             token: token.clone(),
@@ -94,7 +97,7 @@ impl<'a> LoginSession<'a> {
     }
 }
 
-impl LoginSession<'_> {
+impl LoginSession {
     pub async fn refresh_token(&mut self) -> Result<(), ApiError> {
         let token = self.get_new_token().await?;
         self.token = token;
@@ -120,14 +123,14 @@ impl LoginSession<'_> {
             return Err(ApiError::UnexpectedResponse(status, error));
         };
 
-        let token: LoginToken = serde_json::from_str(body.as_str()).map_err(ApiError::JSON)?; 
+        let token: LoginToken = serde_json::from_str(body.as_str()).map_err(ApiError::JsonDecode)?; 
         Ok(token)
     }
 
     pub async fn search_series(&self, name: &String) -> Result<Vec<Series>, ApiError> {
         let params = [("name", name)];
         let base_url = format!("{}/search/series", BASE_URL);
-        let full_url = url::Url::parse_with_params(base_url.as_str(), &params).unwrap();
+        let full_url = url::Url::parse_with_params(base_url.as_str(), &params).expect("Url is valid");
         let res = self.client
             .get(full_url.as_str())
             .header("Authorization", format!("Bearer {}", self.token.token))
@@ -146,8 +149,8 @@ impl LoginSession<'_> {
             return Err(ApiError::UnexpectedResponse(status, error));
         };
 
-        let response_body: ResponseBody = serde_json::from_str(body.as_str()).map_err(ApiError::JSON)?;
-        let data: Vec<Series> = serde_json::from_str(response_body.data.get()).map_err(ApiError::JSON)?;
+        let response_body: ResponseBody = serde_json::from_str(body.as_str()).map_err(ApiError::JsonDecode)?;
+        let data: Vec<Series> = serde_json::from_str(response_body.data.get()).map_err(ApiError::JsonDecode)?;
         Ok(data)
     }
 
@@ -170,8 +173,8 @@ impl LoginSession<'_> {
             return Err(ApiError::UnexpectedResponse(status, error));
         };
 
-        let response_body: ResponseBody = serde_json::from_str(body.as_str()).map_err(ApiError::JSON)?;
-        let series: Series = serde_json::from_str(response_body.data.get()).map_err(ApiError::JSON)?;
+        let response_body: ResponseBody = serde_json::from_str(body.as_str()).map_err(ApiError::JsonDecode)?;
+        let series: Series = serde_json::from_str(response_body.data.get()).map_err(ApiError::JsonDecode)?;
         Ok(series)
     }
 
@@ -193,8 +196,7 @@ impl LoginSession<'_> {
             };
             return Err(ApiError::UnexpectedResponse(status, error));
         };
-
-        let page: EpisodesPage = serde_json::from_str(body.as_str()).map_err(ApiError::JSON)?;
+        let page: EpisodesPage = serde_json::from_str(body.as_str()).map_err(ApiError::JsonDecode)?;
         Ok(page)
     }
 
@@ -210,7 +212,9 @@ impl LoginSession<'_> {
         }
 
         if let Some(links) = page_1.links {
-            let tasks: Vec<_> = (links.next..links.last)
+            let next_page = links.next.unwrap_or(0);
+            let last_page = links.last.unwrap_or(0);
+            let tasks: Vec<_> = (next_page..last_page)
                 .map(|page| self.get_episodes_page(id, page))
                 .collect();
 
@@ -224,10 +228,3 @@ impl LoginSession<'_> {
         Ok(all_episodes)
     }
 }
-
-impl fmt::Display for ApiError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
-}
-
