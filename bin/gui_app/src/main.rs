@@ -10,6 +10,7 @@ use app::app_folder::{AppFileContextSetter, AppFileContextGetter};
 use tvdb::models::{Series, Episode};
 use std::sync::Arc;
 use std::path::Path;
+use serde;
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 enum FileTab {
@@ -38,22 +39,22 @@ impl GuiApp {
 }
 
 fn render_errors_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::Ui, ctx: &egui::Context) {
-    let errors_guard = folder.get_errors().try_write();
-    let mut errors = match errors_guard {
-        Ok(errors) => errors,
-        Err(_) => {
-            ui.spinner();
-            return;
-        },
-    };
-
-    let total_items = errors.len();
-    if total_items == 0 {
-        ui.label("No errors");
-        return;
-    }
-
     egui::ScrollArea::vertical().show(ui, |ui| {
+        let errors_guard = folder.get_errors().try_write();
+        let mut errors = match errors_guard {
+            Ok(errors) => errors,
+            Err(_) => {
+                ui.spinner();
+                return;
+            },
+        };
+
+        let total_items = errors.len();
+        if total_items == 0 {
+            ui.label("No errors");
+            return;
+        }
+        
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
             let mut selected_index = None;
@@ -107,17 +108,71 @@ fn render_files_selectable_list(
                     let descriptor = files.get_src_descriptor(index);
                     let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
                     let src = files.get_src(index);
-                    if ui.selectable_label(is_selected, src).clicked() {
+                    let res = ui.selectable_label(is_selected, src);
+                    if res.clicked() {
                         if is_selected {
                             *folder.get_selected_descriptor().blocking_write() = None;
                         } else {
                             *folder.get_selected_descriptor().blocking_write() = *descriptor;
                         }
                     }
+                    res.context_menu(|ui| {
+                        render_file_context_menu(gui, files, index, ui, ctx);
+                    });
                 });
             }
         });
     });
+}
+
+fn render_file_context_menu(
+    gui: &mut GuiApp, 
+    mut files: &mut AppFileMutableContext<'_>, index: usize,
+    ui: &mut egui::Ui, ctx: &egui::Context,
+) {
+    let action = files.get_action(index);
+    if ui.button("Open file").clicked() {
+        // TODO:
+        ui.close_menu();
+    }
+
+    if ui.button("Open folder").clicked() {
+        // TODO:
+        ui.close_menu();
+    }
+
+    ui.separator();
+
+    if action != Action::Delete {
+        if ui.button("Delete").clicked() {
+            files.set_action(Action::Delete, index);
+            ui.close_menu();
+        }
+    }
+    if action != Action::Rename {
+        if ui.button("Rename").clicked() {
+            files.set_action(Action::Rename, index);
+            ui.close_menu();
+        }
+    }
+    if action != Action::Ignore {
+        if ui.button("Ignore").clicked() {
+            files.set_action(Action::Ignore, index);
+            ui.close_menu();
+        }
+    }
+    if action != Action::Whitelist {
+        if ui.button("Ignore").clicked() {
+            files.set_action(Action::Whitelist, index);
+            ui.close_menu();
+        }
+    }
+    if action != Action::Complete {
+        if ui.button("Complete").clicked() {
+            files.set_action(Action::Complete, index);
+            ui.close_menu();
+        }
+    }
 }
 
 fn render_files_basic_list(
@@ -137,13 +192,18 @@ fn render_files_basic_list(
                 let descriptor = files.get_src_descriptor(index);
                 let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
                 let src = files.get_src(index);
-                if ui.selectable_label(is_selected, src).clicked() {
+                
+                let res = ui.selectable_label(is_selected, src);
+                if res.clicked() {
                     if is_selected {
                         *folder.get_selected_descriptor().blocking_write() = None;
                     } else {
                         *folder.get_selected_descriptor().blocking_write() = *descriptor;
                     }
                 }
+                res.context_menu(|ui| {
+                    render_file_context_menu(gui, files, index, ui, ctx);
+                });
             }
         });
     });
@@ -204,11 +264,15 @@ fn render_files_rename_list(
                             row.col(|ui| {
                                 let is_conflict = files.get_is_conflict(index);
                                 let src = files.get_src(index);
-                                if is_conflict {
-                                    ui.colored_label(egui::Color32::DARK_RED, src);
+                                let res = if is_conflict {
+                                    ui.selectable_label(false, egui::RichText::new(src).color(egui::Color32::DARK_RED))
                                 } else {
-                                    ui.label(src);
-                                }
+
+                                    ui.selectable_label(false, src)
+                                };
+                                res.context_menu(|ui| {
+                                    render_file_context_menu(gui, files, index, ui, ctx);
+                                });
                             });
                             row.col(|ui| {
                                 let dst = files.get_dest(index);
@@ -275,10 +339,15 @@ fn render_files_conflicts_list(
                         })
                         .body(|mut body| {
                             if let Some(index) = source_index {
-                                let src = files.get_src(*index);
                                 body.row(row_height, |mut row| {
                                     row.col(|ui| {});
-                                    row.col(|ui| { ui.label(src); });
+                                    row.col(|ui| { 
+                                        let src = files.get_src(*index);
+                                        let res = ui.selectable_label(false, src); 
+                                        res.context_menu(|ui| {
+                                            render_file_context_menu(gui, files, *index, ui, ctx);
+                                        });
+                                    });
                                     row.col(|ui| {});
                                 });
                             }
@@ -298,7 +367,10 @@ fn render_files_conflicts_list(
 
                                     row.col(|ui| {
                                         let src = files.get_src(index);
-                                        ui.label(src);
+                                        let res = ui.selectable_label(false, src); 
+                                        res.context_menu(|ui| {
+                                            render_file_context_menu(gui, files, index, ui, ctx);
+                                        });
                                     });
 
                                     row.col(|ui| {
@@ -549,7 +621,9 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
     egui::TopBottomPanel::top("folder_controls")
         .resizable(false)
         .show_inside(ui, |ui| {
-            render_folder_controls(gui, &folder, ui, ctx);
+            ui.add_enabled_ui(is_not_busy, |ui| {
+                render_folder_controls(gui, &folder, ui, ctx);
+            });
         });
 
     egui::TopBottomPanel::bottom("folder_error_list")
@@ -561,13 +635,21 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
     egui::SidePanel::right("folder_info")
         .resizable(true)
         .show_inside(ui, |ui| {
-            render_folder_info(gui, &folder, ui, ctx);
+            ui.push_id("folder_info", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    render_folder_info(gui, &folder, ui, ctx);
+                });
+            });
         });
 
     egui::CentralPanel::default()
         .show_inside(ui, |ui| {
-            ui.add_enabled_ui(is_not_busy, |ui| {
-                render_files_list(gui, &folder, ui, ctx);
+            ui.push_id("folder_files_list", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.add_enabled_ui(is_not_busy, |ui| {
+                        render_files_list(gui, &folder, ui, ctx);
+                    });
+                });
             });
         });
 }
@@ -640,63 +722,61 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         return;
     }
 
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        use egui_extras::{Column, TableBuilder};
-        let row_height = 18.0;
-        let mut table = TableBuilder::new(ui)
-            .striped(true)
-            .resizable(true)
-            .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-            .column(Column::auto().clip(true))
-            .column(Column::auto())
-            .column(Column::auto())
-            .column(Column::auto());
+    use egui_extras::{Column, TableBuilder};
+    let row_height = 18.0;
+    let mut table = TableBuilder::new(ui)
+        .striped(true)
+        .resizable(true)
+        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+        .column(Column::auto().clip(true))
+        .column(Column::auto())
+        .column(Column::auto())
+        .column(Column::auto());
 
-        table
-            .header(row_height, |mut header| {
-                header.col(|ui| { ui.strong("Name"); });
-                header.col(|ui| { ui.strong("Status"); });
-                header.col(|ui| { ui.strong("First Aired"); });
-                header.col(|ui| { ui.strong(""); });
-            })
-            .body(|mut body| {
-                let selected_index = *gui.app.get_selected_series_index().blocking_read();
-                for (index, entry) in series.iter().enumerate() {
-                    body.row(row_height, |mut row| {
-                        row.col(|ui| { 
-                            let is_selected = Some(index) == selected_index;
-                            if ui.selectable_label(is_selected, entry.name.as_str()).clicked() {
-                                if is_selected {
-                                    *gui.app.get_selected_series_index().blocking_write() = None;
-                                } else {
-                                    *gui.app.get_selected_series_index().blocking_write() = Some(index);
-                                }
+    table
+        .header(row_height, |mut header| {
+            header.col(|ui| { ui.strong("Name"); });
+            header.col(|ui| { ui.strong("Status"); });
+            header.col(|ui| { ui.strong("First Aired"); });
+            header.col(|ui| { ui.strong(""); });
+        })
+        .body(|mut body| {
+            let selected_index = *gui.app.get_selected_series_index().blocking_read();
+            for (index, entry) in series.iter().enumerate() {
+                body.row(row_height, |mut row| {
+                    row.col(|ui| { 
+                        let is_selected = Some(index) == selected_index;
+                        if ui.selectable_label(is_selected, entry.name.as_str()).clicked() {
+                            if is_selected {
+                                *gui.app.get_selected_series_index().blocking_write() = None;
+                            } else {
+                                *gui.app.get_selected_series_index().blocking_write() = Some(index);
                             }
-                        });
-                        row.col(|ui| {
-                            let label = entry.status.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                            ui.label(label);
-                        });
-                        row.col(|ui| {
-                            let label = entry.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
-                            ui.label(label);
-                        });
-                        row.col(|ui| {
-                            if ui.button("Select").clicked() {
-                                gui.runtime.spawn({
-                                    let entry_id = entry.id;
-                                    let app = gui.app.clone();
-                                    async move {
-                                        app.set_series_to_current_folder(entry_id).await
-                                    }
-                                });
-                            }
-                        });
+                        }
                     });
+                    row.col(|ui| {
+                        let label = entry.status.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+                        ui.label(label);
+                    });
+                    row.col(|ui| {
+                        let label = entry.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+                        ui.label(label);
+                    });
+                    row.col(|ui| {
+                        if ui.button("Select").clicked() {
+                            gui.runtime.spawn({
+                                let entry_id = entry.id;
+                                let app = gui.app.clone();
+                                async move {
+                                    app.set_series_to_current_folder(entry_id).await
+                                }
+                            });
+                        }
+                    });
+                });
 
-                }
-            });
-    });
+            }
+        });
 }
 
 fn render_series_table(series: &Series, ui: &mut egui::Ui, _ctx: &egui::Context) {
@@ -811,30 +891,29 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &e
         },
     };
     
-    ui.push_id("series_search_info_table", |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            render_series_table(series, ui, _ctx);
-        });
-    });
+    render_series_table(series, ui, _ctx);
 }
 
 fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context) {
     egui::TopBottomPanel::top("search_bar")
         .resizable(true)
         .show_inside(ui, |ui| {
-            ui.horizontal(|ui| {
-                let res = ui.text_edit_singleline(&mut gui.series_search);
-                let is_pressed = ui.button("Search").clicked();
-                let is_entered = res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if is_pressed || is_entered {
-                    gui.runtime.spawn({
-                        let series_search = gui.series_search.clone();
-                        let app = gui.app.clone();
-                        async move {
-                            app.update_search_series(series_search).await
-                        }
-                    });
-                }
+            let is_not_busy = gui.app.get_series_busy_lock().try_lock().is_ok();
+            ui.add_enabled_ui(is_not_busy, |ui| {
+                ui.horizontal(|ui| {
+                    let res = ui.text_edit_singleline(&mut gui.series_search);
+                    let is_pressed = ui.button("Search").clicked();
+                    let is_entered = res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if is_pressed || is_entered {
+                        gui.runtime.spawn({
+                            let series_search = gui.series_search.clone();
+                            let app = gui.app.clone();
+                            async move {
+                                app.update_search_series(series_search).await
+                            }
+                        });
+                    }
+                });
             });
         });
 
@@ -843,12 +922,20 @@ fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context
         .default_width(120.0)
         .min_width(80.0)
         .show_inside(ui, |ui| {
-            render_series_search_info_panel(gui, ui, ctx); 
+            ui.push_id("series_search_info_table", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    render_series_search_info_panel(gui, ui, ctx); 
+                });
+            });
         });
 
     egui::CentralPanel::default()
         .show_inside(ui, |ui| {
-            render_series_search_list(gui, ui, ctx);
+            ui.push_id("series_search_list", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    render_series_search_list(gui, ui, ctx);
+                });
+            });
         });
 }
 
@@ -856,7 +943,8 @@ impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("Folders")
             .resizable(true)
-            .default_width(250.0)
+            .default_width(350.0)
+            .min_width(100.0)
             .show(ctx, |ui| {
                 render_folders_list_panel(self, ui, ctx);
             });
@@ -894,7 +982,7 @@ impl eframe::App for FailedGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()
             .show(ctx, |ui| {
-                ui.label(self.message.as_str());
+                ui.colored_label(egui::Color32::DARK_RED, self.message.as_str());
             });
     }
 }
