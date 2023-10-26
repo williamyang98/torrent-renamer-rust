@@ -27,6 +27,18 @@ impl fmt::Display for LoggedOutError {
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum AppInitError {
+    #[error("failed to load filter rules from file: {}", .0)]
+    IOFilterRulesLoad(std::io::Error),
+    #[error("failed to load credentials from file: {}", .0)]
+    IOCredentialsLoad(std::io::Error),
+    #[error("json decode on filter rules: {}", .0)]
+    JsonDecodeFilterRules(serde_json::Error),
+    #[error("json decode on credentials: {}", .0)]
+    JsonDecodeCredentials(serde_json::Error),
+}
+
 pub struct App {
     filter_rules: Arc<FilterRules>,
     credentials: Credentials,
@@ -43,14 +55,19 @@ pub struct App {
 }
 
 impl App {
-    pub async fn new(config_path: &str) -> Result<App, anyhow::Error> {
+    pub async fn new(config_path: &str) -> Result<App, AppInitError> {
         let (filter_rules_str, credentials_str) = tokio::join!(
             tokio::fs::read_to_string(format!("{}/app_config.json", config_path)),
             tokio::fs::read_to_string(format!("{}/credentials.json", config_path)),
         );
 
-        let filter_rules: FilterRules = serde_json::from_str(filter_rules_str?.as_str())?;
-        let credentials: Credentials = serde_json::from_str(credentials_str?.as_str())?;
+        let filter_rules_str = filter_rules_str.map_err(AppInitError::IOFilterRulesLoad)?;
+        let credentials_str = credentials_str.map_err(AppInitError::IOCredentialsLoad)?;
+
+        let filter_rules: FilterRules = serde_json::from_str(filter_rules_str.as_str())
+            .map_err(AppInitError::JsonDecodeFilterRules)?;
+        let credentials: Credentials = serde_json::from_str(credentials_str.as_str())
+            .map_err(AppInitError::JsonDecodeCredentials)?;
         
         Ok(App {
             filter_rules: Arc::new(filter_rules),

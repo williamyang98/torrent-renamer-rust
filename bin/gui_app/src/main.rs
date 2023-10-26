@@ -58,7 +58,7 @@ fn render_errors_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
             let mut selected_index = None;
-            for (index, error) in errors.iter().enumerate() {
+            for (index, error) in errors.iter().enumerate().rev() {
                 if ui.selectable_label(false, error.as_str()).clicked() {
                     selected_index = Some(index);
                 }
@@ -1024,7 +1024,7 @@ fn main() -> Result<(), eframe::Error> {
 
                 let app = match runtime.block_on(App::new(config_path.as_str())) {
                     Ok(app) => Arc::new(app),
-                    Err(err) => return Box::new(FailedGuiApp::new(format!("Failed to create application: {:?}", err))),
+                    Err(err) => return Box::new(FailedGuiApp::new(format!("Failed to create application: {}", err))),
                 };
 
                 runtime.spawn({

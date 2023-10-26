@@ -216,7 +216,7 @@ impl AppFolder {
             };
             let res = recursive_search_file_intents(self.folder_path.as_str(), self.folder_path.as_str(), cache, &mut new_file_table, &self.filter_rules).await;
             if let Err(err) = res {
-                let message = format!("IO error while reading files for intent update: {:?}", err);
+                let message = format!("IO error while reading files for intent update: {}", err);
                 self.errors.write().await.push(message);
                 return None;
             }
@@ -269,12 +269,12 @@ impl AppFolder {
         );
         
         if let Err(err) = series_data.as_ref() {
-            let message = format!("IO error while reading series cache: {:?}", err);
+            let message = format!("IO error while reading series cache: {}", err);
             self.errors.write().await.push(message);
         }
 
         if let Err(err) = episodes_data.as_ref() {
-            let message = format!("IO error while reading episodes cache: {:?}", err);
+            let message = format!("IO error while reading episodes cache: {}", err);
             self.errors.write().await.push(message);
         }
 
@@ -284,7 +284,7 @@ impl AppFolder {
         let series: Series = match serde_json::from_str(series_data.as_str()) {
             Ok(series) => series,
             Err(err) => {
-                let message = format!("JSON decoding error reading series from file: {:?}", err);
+                let message = format!("JSON decoding error reading series from file: {}", err);
                 self.errors.write().await.push(message);
                 return None;
             },
@@ -293,7 +293,7 @@ impl AppFolder {
         let episodes: Vec<Episode> = match serde_json::from_str(episodes_data.as_str()) {
             Ok(episodes) => episodes,
             Err(err) => {
-                let message = format!("JSON decoding error reading episodes from file: {:?}", err);
+                let message = format!("JSON decoding error reading episodes from file: {}", err);
                 self.errors.write().await.push(message);
                 return None;
             },
@@ -319,7 +319,7 @@ impl AppFolder {
         let series = match series_res {
             Ok(series) => series,
             Err(err) => {
-                let message = format!("Api error while fetching series: {:?}", err);
+                let message = format!("Api error while fetching series: {}", err);
                 self.errors.write().await.push(message);
                 return None;
             },
@@ -328,7 +328,7 @@ impl AppFolder {
         let episodes = match episodes_res {
             Ok(episodes) => episodes,
             Err(err) => {
-                let message = format!("Api error while fetching episodes: {:?}", err);
+                let message = format!("Api error while fetching episodes: {}", err);
                 self.errors.write().await.push(message);
                 return None;
             },
@@ -345,7 +345,7 @@ impl AppFolder {
             match cache_guard.as_ref() {
                 Some(cache) => cache.series.id,
                 None => {
-                    let message = format!("Couldn't save cache to file since it is unloaded");
+                    let message = format!("Couldn't refresh cache since it requires an existing loaded cache");
                     self.errors.write().await.push(message);
                     return None;
                 },
@@ -370,7 +370,7 @@ impl AppFolder {
             let series_str = match serde_json::to_string_pretty(&cache.series) {
                 Ok(data) => data,
                 Err(err) => {
-                    let message = format!("JSON encode error when saving series cache: {:?}", err);
+                    let message = format!("JSON encode error when saving series cache: {}", err);
                     self.errors.write().await.push(message);
                     return None;
                 },
@@ -378,7 +378,7 @@ impl AppFolder {
             let episodes_str = match serde_json::to_string_pretty(&cache.episodes) {
                 Ok(data) => data,
                 Err(err) => {
-                    let message = format!("JSON encode error when saving episodes cache: {:?}", err);
+                    let message = format!("JSON encode error when saving episodes cache: {}", err);
                     self.errors.write().await.push(message);
                     return None;
                 },
@@ -392,12 +392,12 @@ impl AppFolder {
         );
 
         if let Err(err) = res_0.as_ref() {
-            let message = format!("IO error while saving series cache: {:?}", err);
+            let message = format!("IO error while saving series cache: {}", err);
             self.errors.write().await.push(message);
         }
 
         if let Err(err) = res_1.as_ref() {
-            let message = format!("IO error while saving episodes cache: {:?}", err);
+            let message = format!("IO error while saving episodes cache: {}", err);
             self.errors.write().await.push(message);
         }
         
@@ -547,11 +547,12 @@ impl AppFolder {
                 }
             }
         }
-
+        
+        let mut errors = self.errors.write().await;
         for res in futures::future::join_all(tasks).await.into_iter() {
             if let Err(err) = res {
-                // TODO: Error logging
-                println!("{:?}", err);
+                let message = format!("IO error while executing file changes: {}", err);
+                errors.push(message);
             };
         }
     }
@@ -585,10 +586,11 @@ impl AppFolder {
             });
         }
 
+        let mut errors = self.errors.write().await;
         for res in futures::future::join_all(tasks).await.into_iter() {
             if let Err(err) = res {
-                // TODO: Error logging
-                println!("{:?}", err);
+                let message = format!("IO error while deleting empty folders: {}", err);
+                errors.push(message);
             };
         }
     }
