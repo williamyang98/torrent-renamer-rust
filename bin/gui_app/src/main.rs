@@ -78,10 +78,10 @@ fn render_file_context_menu(
     if ui.button("Open file").clicked() {
         gui.runtime.spawn({
             let src = files.get_src(index);
-            let file_path = Path::new(folder_path).join(src);
-            let file_path_str = file_path.to_string_lossy().to_string();
+            let filename_path = Path::new(folder_path).join(src);
+            let filename_path_str = filename_path.to_string_lossy().to_string();
             async move {
-                cross_open::that(file_path_str)
+                cross_open::that(filename_path_str)
             }
         });
         ui.close_menu();
@@ -89,7 +89,10 @@ fn render_file_context_menu(
 
     if ui.button("Open folder").clicked() {
         gui.runtime.spawn({
-            let folder_path_str = folder_path.to_string();
+            let src = files.get_src(index);
+            let filename_path = Path::new(folder_path).join(src);
+            let folder_path = filename_path.parent().unwrap_or(Path::new("."));
+            let folder_path_str = folder_path.to_string_lossy().to_string();
             async move {
                 cross_open::that(folder_path_str)
             }
