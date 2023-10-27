@@ -89,7 +89,7 @@ pub async fn login(client: &reqwest::Client, login_info: &LoginInfo) -> Result<L
 }
 
 impl LoginSession {
-    pub fn new<'b>(client: Arc<reqwest::Client>, token: &LoginToken) -> Self {
+    pub fn new(client: Arc<reqwest::Client>, token: &LoginToken) -> Self {
         Self {
             client,
             token: token.clone(),

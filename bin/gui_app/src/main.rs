@@ -1,18 +1,16 @@
-use app::file_intent::Action;
 use tokio;
 use egui;
-use egui_extras;
+use egui_extras::{Column, TableBuilder};
 use eframe;
 use tokio::sync::RwLockReadGuard;
 use app::app::App;
-use app::app_folder::{AppFolder, AppFileMutableContext, ConflictTable};
-use app::app_folder::{AppFileContextSetter, AppFileContextGetter};
+use app::app_folder::{AppFolder, AppFileMutableContext, AppFileContextGetter, FileTracker};
+use app::file_intent::Action;
 use tvdb::models::{Series, Episode};
 use std::sync::Arc;
 use std::path::Path;
-use serde;
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq)]
 enum FileTab {
     FileAction(Action),
     Conflicts,
@@ -38,7 +36,7 @@ impl GuiApp {
     }
 }
 
-fn render_errors_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::Ui, ctx: &egui::Context) {
+fn render_errors_list(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         let errors_guard = folder.get_errors().try_write();
         let mut errors = match errors_guard {
@@ -71,13 +69,43 @@ fn render_errors_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::
     });
 }
 
-fn render_files_selectable_list(
-    gui: &mut GuiApp, folder: &Arc<AppFolder>, mut files: &mut AppFileMutableContext<'_>, 
-    selected_action: Action,
-    ui: &mut egui::Ui, ctx: &egui::Context,
+fn render_file_context_menu(
+    _gui: &mut GuiApp, ui: &mut egui::Ui, 
+    files: &mut AppFileMutableContext<'_>, index: usize,
 ) {
-    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
+    let current_action = files.get_action(index);
+    if ui.button("Open file").clicked() {
+        // TODO:
+        ui.close_menu();
+    }
 
+    if ui.button("Open folder").clicked() {
+        // TODO:
+        ui.close_menu();
+    }
+
+    ui.separator();
+    
+    for action in Action::iterator() {
+        let action = *action;
+        if action != current_action && ui.button(action.to_str()).clicked() {
+            files.set_action(action, index);
+            ui.close_menu();
+        }
+    }
+}
+
+
+fn render_files_selectable_list(
+    gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action,
+    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
+) {
+    if file_tracker.get_action_count()[selected_action] == 0 {
+        ui.heading(format!("No {}s", selected_action.to_str().to_lowercase()));
+        return;
+    }
+
+    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     let mut is_select_all = false;
     let mut is_deselect_all = false;
     ui.horizontal(|ui| {
@@ -117,7 +145,7 @@ fn render_files_selectable_list(
                         }
                     }
                     res.context_menu(|ui| {
-                        render_file_context_menu(gui, files, index, ui, ctx);
+                        render_file_context_menu(gui, ui, files, index);
                     });
                 });
             }
@@ -125,61 +153,15 @@ fn render_files_selectable_list(
     });
 }
 
-fn render_file_context_menu(
-    gui: &mut GuiApp, 
-    mut files: &mut AppFileMutableContext<'_>, index: usize,
-    ui: &mut egui::Ui, ctx: &egui::Context,
-) {
-    let action = files.get_action(index);
-    if ui.button("Open file").clicked() {
-        // TODO:
-        ui.close_menu();
-    }
-
-    if ui.button("Open folder").clicked() {
-        // TODO:
-        ui.close_menu();
-    }
-
-    ui.separator();
-
-    if action != Action::Delete {
-        if ui.button("Delete").clicked() {
-            files.set_action(Action::Delete, index);
-            ui.close_menu();
-        }
-    }
-    if action != Action::Rename {
-        if ui.button("Rename").clicked() {
-            files.set_action(Action::Rename, index);
-            ui.close_menu();
-        }
-    }
-    if action != Action::Ignore {
-        if ui.button("Ignore").clicked() {
-            files.set_action(Action::Ignore, index);
-            ui.close_menu();
-        }
-    }
-    if action != Action::Whitelist {
-        if ui.button("Ignore").clicked() {
-            files.set_action(Action::Whitelist, index);
-            ui.close_menu();
-        }
-    }
-    if action != Action::Complete {
-        if ui.button("Complete").clicked() {
-            files.set_action(Action::Complete, index);
-            ui.close_menu();
-        }
-    }
-}
-
 fn render_files_basic_list(
-    gui: &mut GuiApp, folder: &Arc<AppFolder>, mut files: &mut AppFileMutableContext<'_>, 
-    selected_action: Action,
-    ui: &mut egui::Ui, ctx: &egui::Context,
+    gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action,
+    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
 ) {
+    if file_tracker.get_action_count()[selected_action] == 0 {
+        ui.heading(format!("No {}s", selected_action.to_str().to_lowercase()));
+        return;
+    }
+
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
@@ -202,7 +184,7 @@ fn render_files_basic_list(
                     }
                 }
                 res.context_menu(|ui| {
-                    render_file_context_menu(gui, files, index, ui, ctx);
+                    render_file_context_menu(gui, ui, files, index);
                 });
             }
         });
@@ -210,9 +192,16 @@ fn render_files_basic_list(
 }
 
 fn render_files_rename_list(
-    gui: &mut GuiApp, folder: &Arc<AppFolder>, mut files: &mut AppFileMutableContext<'_>, 
-    ui: &mut egui::Ui, ctx: &egui::Context,
+    gui: &mut GuiApp, ui: &mut egui::Ui,
+    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
 ) {
+    if file_tracker.get_action_count()[Action::Rename] == 0 {
+        ui.heading("No renames");
+        return;
+    }
+
+    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
+
     let mut is_select_all = false;
     let mut is_deselect_all = false;
     ui.horizontal(|ui| {
@@ -220,23 +209,19 @@ fn render_files_rename_list(
         is_deselect_all = ui.button("Deselect all").clicked();
     });
     
-    use egui_extras::{Column, TableBuilder};
-
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Center).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
-            let mut table = TableBuilder::new(ui)
+            let row_height = 18.0;
+            TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
                 .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
-                .column(Column::auto())
+                .column(Column::auto().resizable(false))
                 .column(Column::auto().clip(true))
-                .column(Column::auto().clip(true));
-            
-            let row_height = 18.0;
-            table
+                .column(Column::remainder().clip(true).resizable(false))
                 .header(row_height, |mut header| {
-                    header.col(|ui| {});
+                    header.col(|_| {});
                     header.col(|ui| { ui.strong("Source"); });
                     header.col(|ui| { ui.strong("Destination"); });
                 })
@@ -262,23 +247,30 @@ fn render_files_rename_list(
                                 }
                             });
                             row.col(|ui| {
+                                let descriptor = files.get_src_descriptor(index);
+                                let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
                                 let is_conflict = files.get_is_conflict(index);
                                 let src = files.get_src(index);
                                 let res = if is_conflict {
-                                    ui.selectable_label(false, egui::RichText::new(src).color(egui::Color32::DARK_RED))
+                                    ui.selectable_label(is_selected, egui::RichText::new(src).color(egui::Color32::DARK_RED))
                                 } else {
-
-                                    ui.selectable_label(false, src)
+                                    ui.selectable_label(is_selected, src)
                                 };
+                                if res.clicked() {
+                                    if is_selected {
+                                        *folder.get_selected_descriptor().blocking_write() = None;
+                                    } else {
+                                        *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                                    }
+                                }
                                 res.context_menu(|ui| {
-                                    render_file_context_menu(gui, files, index, ui, ctx);
+                                    render_file_context_menu(gui, ui, files, index);
                                 });
                             });
                             row.col(|ui| {
-                                let dst = files.get_dest(index);
-                                let mut dst_tmp = dst.to_string();
-                                if ui.text_edit_singleline(&mut dst_tmp).changed() {
-                                    files.set_dest(dst_tmp, index);       
+                                let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                if ui.text_edit_singleline(&mut dest_edit_buffer).changed() {
+                                    files.set_dest(dest_edit_buffer, index);
                                 }
                             });
                         });
@@ -291,20 +283,23 @@ fn render_files_rename_list(
 }
 
 fn render_files_conflicts_list(
-    gui: &mut GuiApp, folder: &Arc<AppFolder>, 
-    mut files: &mut AppFileMutableContext<'_>, table: RwLockReadGuard<ConflictTable>, 
-    ui: &mut egui::Ui, ctx: &egui::Context,
+    gui: &mut GuiApp, ui: &mut egui::Ui,
+    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
 ) {
-    let mut is_first = true;
+    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
+    
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
-            for (row_id, (dest, indices)) in table.get_pending_writes().iter().enumerate() {
+            // keep track of when to add separators
+            let mut is_first = true;
+            let mut total_conflicts = 0;
+            for (row_id, (dest, indices)) in file_tracker.get_pending_writes().iter().enumerate() {
                 let mut total_files = indices.len();
                 if total_files == 0 {
                     continue;
                 }
-                let source_index = table.get_source_index(dest.as_str());
+                let source_index = file_tracker.get_source_index(dest.as_str());
                 if source_index.is_some() {
                     total_files += 1;
                 }
@@ -312,6 +307,7 @@ fn render_files_conflicts_list(
                 if !is_conflict {
                     continue;
                 }
+                total_conflicts += 1;
 
                 ui.push_id(row_id, |ui| {
                     if !is_first {
@@ -319,36 +315,43 @@ fn render_files_conflicts_list(
                     }
                     is_first = false;
 
-                    ui.strong(dest);
+                    ui.heading(dest);
 
-                    use egui_extras::{Column, TableBuilder};
                     let row_height = 18.0;
-                    let mut table = TableBuilder::new(ui)
+                    TableBuilder::new(ui)
                         .striped(true)
                         .resizable(true)
                         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                        .column(Column::auto())
+                        .column(Column::auto().resizable(false))
                         .column(Column::auto().clip(true))
-                        .column(Column::auto().clip(true));
-
-                    table
+                        .column(Column::remainder().resizable(false).clip(true))
                         .header(row_height, |mut header| {
-                            header.col(|ui| {});
+                            header.col(|_| {});
                             header.col(|ui| { ui.strong("Source"); });
                             header.col(|ui| { ui.strong("Destination"); });
                         })
                         .body(|mut body| {
                             if let Some(index) = source_index {
+                                let index = *index;
                                 body.row(row_height, |mut row| {
-                                    row.col(|ui| {});
+                                    row.col(|_| {});
                                     row.col(|ui| { 
-                                        let src = files.get_src(*index);
+                                        let descriptor = files.get_src_descriptor(index);
+                                        let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                                        let src = files.get_src(index);
                                         let res = ui.selectable_label(false, src); 
+                                        if res.clicked() {
+                                            if is_selected {
+                                                *folder.get_selected_descriptor().blocking_write() = None;
+                                            } else {
+                                                *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                                            }
+                                        }
                                         res.context_menu(|ui| {
-                                            render_file_context_menu(gui, files, *index, ui, ctx);
+                                            render_file_context_menu(gui, ui, files, index);
                                         });
                                     });
-                                    row.col(|ui| {});
+                                    row.col(|_| {});
                                 });
                             }
 
@@ -364,21 +367,18 @@ fn render_files_conflicts_list(
                                             }
                                         }
                                     });
-
                                     row.col(|ui| {
                                         let src = files.get_src(index);
                                         let res = ui.selectable_label(false, src); 
                                         res.context_menu(|ui| {
-                                            render_file_context_menu(gui, files, index, ui, ctx);
+                                            render_file_context_menu(gui, ui, files, index);
                                         });
                                     });
-
                                     row.col(|ui| {
                                         if action == Action::Rename {
-                                            let dst = files.get_dest(index);
-                                            let mut dst_tmp = dst.to_string();
-                                            if ui.text_edit_singleline(&mut dst_tmp).changed() {
-                                                files.set_dest(dst_tmp, index);       
+                                            let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                            if ui.text_edit_singleline(&mut dest_edit_buffer).changed() {
+                                                files.set_dest(dest_edit_buffer, index);
                                             }
                                         }
                                     });
@@ -387,25 +387,23 @@ fn render_files_conflicts_list(
                         });
                 });
             }
+
+            if total_conflicts == 0 {
+                ui.heading("No conflicts");
+            }
         });
     });
 }
 
-fn render_files_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::Ui, ctx: &egui::Context) {
-    let table_lock = folder.get_conflict_table().try_read();
-    let table_guard = match table_lock {
-        Ok(guard) => guard,
-        Err(_) => return,
-    };
-
+fn render_files_tab_bar(gui: &mut GuiApp, ui: &mut egui::Ui, file_tracker: &RwLockReadGuard<FileTracker>) {
     let total_conflicts = {
         let mut total_conflicts = 0;
-        for (dest, indices) in table_guard.get_pending_writes() {
+        for (dest, indices) in file_tracker.get_pending_writes() {
             let mut total_files = indices.len();
             if total_files == 0 {
                 continue;
             }
-            if table_guard.get_source_index(dest.as_str()).is_some() {
+            if file_tracker.get_source_index(dest.as_str()).is_some() {
                 total_files += 1;
             }
             let is_conflict = total_files > 1;
@@ -430,15 +428,8 @@ fn render_files_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::U
             let label = match tab {
                 FileTab::Conflicts => format!("Conflicts {}", total_conflicts),
                 FileTab::FileAction(action) => {
-                    let label = match action {
-                        Action::Complete => "Complete",
-                        Action::Rename => "Rename",
-                        Action::Delete => "Delete",
-                        Action::Ignore => "Ignore",
-                        Action::Whitelist => "Whitelist",
-                    };
-                    let count = table_guard.get_action_count()[action];
-                    format!("{} {}", label, count)
+                    let count = file_tracker.get_action_count()[action];
+                    format!("{} {}", action.to_str(), count)
                 },
             };
 
@@ -448,6 +439,16 @@ fn render_files_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::U
             }
         }
     });
+}
+
+fn render_files_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let file_tracker = match folder.get_file_tracker().try_read() {
+        Ok(guard) => guard,
+        Err(_) => return,
+    };
+    
+    render_files_tab_bar(gui, ui, &file_tracker);
+    ui.separator();
     
     let mut files = match folder.get_mut_files_try_blocking() {
         Some(files) => files,
@@ -457,20 +458,20 @@ fn render_files_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::U
         },
     };
 
-    let total_items = files.get_total_items();
-    if total_items == 0 {
+    if files.is_empty() {
         ui.label("Empty folder");
         return;
     }
 
     match gui.selected_tab {
         FileTab::FileAction(action) => match action {
-            Action::Rename => render_files_rename_list(gui, folder, &mut files, ui, ctx),
-            Action::Delete => render_files_selectable_list(gui, folder, &mut files, action, ui, ctx),
-            _ => render_files_basic_list(gui, folder, &mut files, action, ui, ctx),
+            Action::Rename => render_files_rename_list(gui, ui, folder, &mut files, &file_tracker),
+            Action::Delete => render_files_selectable_list(gui, ui, action, folder, &mut files, &file_tracker),
+            _ => render_files_basic_list(gui, ui, action, folder, &mut files, &file_tracker),
         },
-        FileTab::Conflicts => render_files_conflicts_list(gui, folder, &mut files, table_guard, ui, ctx),
+        FileTab::Conflicts => render_files_conflicts_list(gui, ui, folder, &mut files, &file_tracker),
     };
+    
     gui.runtime.spawn({
         let folder = folder.clone();
         async move {
@@ -479,7 +480,7 @@ fn render_files_list(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::U
     });
 }
 
-fn render_folder_controls(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::Ui, ctx: &egui::Context) {
+fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     ui.horizontal(|ui| {
         if ui.button("Update file intents").clicked() {
             let folder = folder.clone();
@@ -520,10 +521,9 @@ fn render_folder_controls(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut eg
     });
 }
 
-fn render_folder_info(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::Ui, ctx: &egui::Context) {
-    let cache_lock = folder.get_cache().try_read();
-    let cache_guard = match cache_lock {
-        Ok(cache) => cache,
+fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let cache_guard = match folder.get_cache().try_read() {
+        Ok(guard) => guard,
         Err(_) => {
             ui.spinner();
             return;
@@ -541,7 +541,7 @@ fn render_folder_info(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::
     ui.heading("Series");
     ui.push_id("series_table", |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            render_series_table(&cache.series, ui, ctx);
+            render_series_table(ui, &cache.series);
         });
     });
 
@@ -575,12 +575,12 @@ fn render_folder_info(gui: &mut GuiApp, folder: &Arc<AppFolder>, ui: &mut egui::
     
     ui.push_id("episodes_table", |ui| {
         egui::ScrollArea::vertical().show(ui, |ui| {
-            render_episode_table(episode, ui, ctx);
+            render_episode_table(ui, episode);
         });
     });
 }
 
-fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
     let (folder, is_not_busy) = {
         let folders = match gui.app.get_folders().try_read() {
             Ok(folders) => folders,
@@ -622,14 +622,14 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
         .resizable(false)
         .show_inside(ui, |ui| {
             ui.add_enabled_ui(is_not_busy, |ui| {
-                render_folder_controls(gui, &folder, ui, ctx);
+                render_folder_controls(gui, ui, &folder);
             });
         });
 
     egui::TopBottomPanel::bottom("folder_error_list")
         .resizable(true)
         .show_inside(ui, |ui| {
-            render_errors_list(gui, &folder, ui, ctx);
+            render_errors_list(ui, &folder);
         });
 
     egui::SidePanel::right("folder_info")
@@ -637,7 +637,7 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
         .show_inside(ui, |ui| {
             ui.push_id("folder_info", |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    render_folder_info(gui, &folder, ui, ctx);
+                    render_folder_info(ui, &folder);
                 });
             });
         });
@@ -647,7 +647,7 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context)
             ui.push_id("folder_files_list", |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     ui.add_enabled_ui(is_not_busy, |ui| {
-                        render_files_list(gui, &folder, ui, ctx);
+                        render_files_list(gui, ui, &folder);
                     });
                 });
             });
@@ -663,15 +663,14 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         },
     };
 
-    let total_folders = folders.len();
-    ui.heading(format!("Folders ({})", total_folders));
+    ui.heading(format!("Folders ({})", folders.len()));
     if gui.app.get_folders_busy_lock().try_lock().is_err() {
         ui.spinner();
         return;
     }
 
-    if total_folders == 0 {
-        ui.label("No folders here");
+    if folders.is_empty() {
+        ui.label("No folders");
         return;
     }
     
@@ -680,7 +679,7 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         ui.with_layout(layout, |ui| {
             let selected_index = *gui.app.get_selected_folder_index().blocking_read();
             for (index, folder) in folders.iter().enumerate() {
-                let label = format!("{}", folder.get_folder_name());
+                let label = folder.get_folder_name().to_string();
                 let mut is_selected = selected_index == Some(index);
                 if ui.toggle_value(&mut is_selected, label).clicked() {
                     let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
@@ -722,18 +721,15 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         return;
     }
 
-    use egui_extras::{Column, TableBuilder};
     let row_height = 18.0;
-    let mut table = TableBuilder::new(ui)
+    TableBuilder::new(ui)
         .striped(true)
         .resizable(true)
         .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
         .column(Column::auto().clip(true))
-        .column(Column::auto())
-        .column(Column::auto())
-        .column(Column::auto());
-
-    table
+        .column(Column::auto().resizable(false))
+        .column(Column::auto().resizable(false))
+        .column(Column::auto().resizable(false))
         .header(row_height, |mut header| {
             header.col(|ui| { ui.strong("Name"); });
             header.col(|ui| { ui.strong("Status"); });
@@ -755,11 +751,11 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
                         }
                     });
                     row.col(|ui| {
-                        let label = entry.status.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+                        let label = entry.status.as_deref().unwrap_or("Unknown");
                         ui.label(label);
                     });
                     row.col(|ui| {
-                        let label = entry.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+                        let label = entry.first_aired.as_deref().unwrap_or("Unknown");
                         ui.label(label);
                     });
                     row.col(|ui| {
@@ -779,7 +775,7 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         });
 }
 
-fn render_series_table(series: &Series, ui: &mut egui::Ui, _ctx: &egui::Context) {
+fn render_series_table(ui: &mut egui::Ui, series: &Series) {
     egui::Grid::new("series_table")
         .num_columns(2)
         .striped(true)
@@ -789,18 +785,17 @@ fn render_series_table(series: &Series, ui: &mut egui::Ui, _ctx: &egui::Context)
             ui.end_row();
 
             ui.strong("Name");
-            let label = format!("{}", series.name.as_str());
-            let gui_label = egui::Label::new(label).wrap(true);
+            let gui_label = egui::Label::new(series.name.as_str()).wrap(true);
             ui.add(gui_label);
             ui.end_row();
 
             ui.strong("Status");
-            let label = series.status.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let label = series.status.as_deref().unwrap_or("Unknown");
             ui.label(label);
             ui.end_row();
 
             ui.strong("Air date");
-            let label = series.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let label = series.first_aired.as_deref().unwrap_or("Unknown");
             ui.label(label);
             ui.end_row();
 
@@ -814,14 +809,14 @@ fn render_series_table(series: &Series, ui: &mut egui::Ui, _ctx: &egui::Context)
             ui.end_row();
 
             ui.strong("Overview");
-            let label = series.overview.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let label = series.overview.as_deref().unwrap_or("Unknown");
             let gui_label = egui::Label::new(label).wrap(true);
             ui.add(gui_label);
             ui.end_row();
         });
 }
 
-fn render_episode_table(episode: &Episode, ui: &mut egui::Ui, _ctx: &egui::Context) {
+fn render_episode_table(ui: &mut egui::Ui, episode: &Episode) {
     egui::Grid::new("episode_table")
         .num_columns(2)
         .striped(true)
@@ -835,29 +830,24 @@ fn render_episode_table(episode: &Episode, ui: &mut egui::Ui, _ctx: &egui::Conte
             ui.end_row();
 
             ui.strong("Name");
-            ui.label(episode.name.as_ref().map(|x| x.as_str()).unwrap_or("None"));
+            ui.label(episode.name.as_deref().unwrap_or("None"));
             ui.end_row();
 
             ui.strong("Air date"); 
-            let label = episode.first_aired.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let label = episode.first_aired.as_deref().unwrap_or("Unknown");
             ui.label(label);
             ui.end_row();
 
             ui.strong("Overview");
-            let label = episode.overview.as_ref().map(|x| x.as_str()).unwrap_or("Unknown");
+            let label = episode.overview.as_deref().unwrap_or("Unknown");
             let gui_label = egui::Label::new(label).wrap(true);
             ui.add(gui_label);
             ui.end_row();
         });
 }
 
-fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
-    if gui.app.get_series_busy_lock().try_lock().is_err() {
-        ui.spinner();
-        return;
-    }
-
-    let series = match gui.app.get_series().try_read() {
+fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
+    let series_opt = match gui.app.get_series().try_read() {
         Ok(series) => series,
         Err(_) => {
             ui.spinner();
@@ -865,8 +855,8 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &e
         },
     };
 
-    let series = match series.as_ref() {
-        Some(series) => series,
+    let series_list = match series_opt.as_ref() {
+        Some(series_list) => series_list,
         None => {
             ui.label("No series information");
             return;
@@ -882,8 +872,7 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &e
         },
     };
     
-    let series = &series.get(selected_index);
-    let series = match series {
+    let series = match series_list.get(selected_index) {
         Some(series) => series,
         None => {
             ui.colored_label(egui::Color32::DARK_RED, "Series index is outside of bounds");
@@ -891,7 +880,7 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &e
         },
     };
     
-    render_series_table(series, ui, _ctx);
+    render_series_table(ui, series);
 }
 
 fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -924,7 +913,7 @@ fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context
         .show_inside(ui, |ui| {
             ui.push_id("series_search_info_table", |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    render_series_search_info_panel(gui, ui, ctx); 
+                    render_series_search_info_panel(gui, ui); 
                 });
             });
         });
@@ -951,7 +940,7 @@ impl eframe::App for GuiApp {
 
         egui::CentralPanel::default()
             .show(ctx, |ui| {
-                render_folder_panel(self, ui, ctx);
+                render_folder_panel(self, ui);
             });
 
         let mut is_open = self.show_series_search;
@@ -982,7 +971,8 @@ impl eframe::App for FailedGuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default()
             .show(ctx, |ui| {
-                ui.colored_label(egui::Color32::DARK_RED, self.message.as_str());
+                let label = egui::RichText::new(self.message.as_str()).color(egui::Color32::DARK_RED);
+                ui.heading(label);
             });
     }
 }
@@ -1007,8 +997,10 @@ fn main() -> Result<(), eframe::Error> {
     let default_config_path = Path::new("./res").to_string_lossy().to_string();
     let config_path = args.get(2).unwrap_or(&default_config_path);
 
-    let mut native_options = eframe::NativeOptions::default();
-    native_options.maximized = true;
+    let native_options = eframe::NativeOptions { 
+        maximized: true, 
+        ..Default::default() 
+    };
 
     eframe::run_native(
         "Torrent Renamer", 
@@ -1019,12 +1011,18 @@ fn main() -> Result<(), eframe::Error> {
             move |_| {
                 let runtime = match tokio::runtime::Runtime::new() {
                     Ok(runtime) => runtime,
-                    Err(err) => return Box::new(FailedGuiApp::new(format!("Failed to create tokio runtime: {:?}", err))),
+                    Err(err) => {
+                        let message = format!("Failed to create tokio runtime: {}", err);
+                        return Box::new(FailedGuiApp::new(message));
+                    },
                 };
 
                 let app = match runtime.block_on(App::new(config_path.as_str())) {
                     Ok(app) => Arc::new(app),
-                    Err(err) => return Box::new(FailedGuiApp::new(format!("Failed to create application: {}", err))),
+                    Err(err) => {
+                        let message = format!("Failed to create application: {}", err);
+                        return Box::new(FailedGuiApp::new(message));
+                    },
                 };
 
                 runtime.spawn({

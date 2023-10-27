@@ -13,6 +13,29 @@ pub enum Action {
     Whitelist,
 }
 
+impl Action {
+    pub fn iterator() -> std::slice::Iter<'static, Self> {
+        static ACTIONS: [Action;5] = [
+            Action::Rename,
+            Action::Complete,
+            Action::Ignore,
+            Action::Delete,
+            Action::Whitelist,
+        ];
+        ACTIONS.iter() 
+    }
+
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            Action::Complete => "Complete",
+            Action::Rename => "Rename",
+            Action::Delete => "Delete",
+            Action::Ignore => "Ignore",
+            Action::Whitelist => "Whitelist",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct FileIntent {
     pub action: Action,
@@ -94,7 +117,7 @@ pub fn get_file_intent(path_str: &str, rules: &FilterRules, cache: &AppFolderCac
                 None => "".to_string(),
                 Some(name) => {
                     let clean_name = clean_episode_title(name.as_str());
-                    if clean_name.len() == 0 {
+                    if clean_name.is_empty() {
                         "".to_string()
                     } else {
                         format!("-{}", clean_name.as_str())

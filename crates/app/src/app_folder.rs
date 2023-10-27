@@ -5,7 +5,7 @@ use std::collections::{HashMap,HashSet};
 use std::sync::Arc;
 use std::fmt;
 use tvdb::models::{Episode, Series};
-use tvdb::api::{LoginSession, ApiError};
+use tvdb::api::LoginSession;
 use walkdir;
 use std::path;
 use tokio;
@@ -18,9 +18,7 @@ const PATH_STR_BOOKMARKS: &str = "bookmarks.json";
 const PATH_STR_EPISODES_DATA: &str = "episodes.json";
 const PATH_STR_SERIES_DATA: &str = "series.json";
 
-// Changes are queued by calling methods in AppFileContext
-// We an update our conflict table from these queued changes by calling AppFolder.flush_file_changes()
-pub struct ConflictTable {
+pub struct FileTracker {
     pending_writes: HashMap<String, HashSet<usize>>,
     existing_sources: HashMap<String, usize>,
     action_count: enum_map::EnumMap<Action, usize>,
@@ -34,21 +32,23 @@ pub struct AppFile {
     is_enabled: bool,
 }
 
-#[derive(Debug, Clone)]
-enum AppFileChange {
-    SetAction(usize, Action),
-    SetIsEnabled(usize, bool),
-    SetDest(usize, String),
+pub struct AppFileImmutableContext<'a> {
+    file_list: RwLockReadGuard<'a, Vec<AppFile>>,
+    file_tracker: RwLockReadGuard<'a, FileTracker>,
 }
 
-pub struct AppFileImmutableContext<'a> {
-    file_table: RwLockReadGuard<'a, Vec<AppFile>>,
-    conflict_table: RwLockReadGuard<'a, ConflictTable>,
+// We queue all our changes to our files so we can iterate over them while submitting changes
+// We iterate over an immutable reference to the files while submitting to a mutable queue
+// Then we take a mutable reference to the file and queue and perform the changes
+enum AppFileChange {
+    SetAction(usize, Action),
+    IsEnabled(usize, bool),
+    Destination(usize, String),
 }
 
 pub struct AppFileMutableContext<'a> {
-    file_table: RwLockReadGuard<'a, Vec<AppFile>>,
-    conflict_table: RwLockReadGuard<'a, ConflictTable>,
+    file_list: RwLockReadGuard<'a, Vec<AppFile>>,
+    file_tracker: RwLockReadGuard<'a, FileTracker>,
     change_queue: RwLockWriteGuard<'a, Vec<AppFileChange>>,
 }
 
@@ -58,9 +58,8 @@ pub struct AppFolder {
     filter_rules: Arc<FilterRules>,
     cache: Arc<RwLock<Option<AppFolderCache>>>,
 
-    file_table: Arc<RwLock<Vec<AppFile>>>,
-    conflict_table: Arc<RwLock<ConflictTable>>,
-    // Only one AppFileContext can perform a modification on the change queue
+    file_list: Arc<RwLock<Vec<AppFile>>>,
+    file_tracker: Arc<RwLock<FileTracker>>,
     change_queue: Arc<RwLock<Vec<AppFileChange>>>,
 
     errors: Arc<RwLock<Vec<String>>>,
@@ -69,7 +68,7 @@ pub struct AppFolder {
     is_initial_load: Arc<RwLock<bool>>,
 }
 
-impl ConflictTable {
+impl FileTracker {
     fn new() -> Self {
         Self {
             pending_writes: HashMap::new(),
@@ -105,15 +104,19 @@ impl ConflictTable {
     }
 
     fn check_if_write_conflicts(&self, dest: &str) -> bool {
-        if let Some(_) = self.existing_sources.get(dest) {
+        let mut total_files = 0;
+        if self.existing_sources.get(dest).is_some() {
+            total_files += 1;
+        }
+        // NOTE: Exit early to avoid extra table lookup
+        if total_files > 1 {
             return true;
         }
-
         if let Some(entries) = self.pending_writes.get(dest) {
-            return entries.len() > 1usize;
+            total_files += entries.len();
         } 
 
-        false
+        total_files > 1
     }
 
     pub fn get_pending_writes(&self) -> &HashMap<String, HashSet<usize>> {
@@ -141,8 +144,8 @@ impl AppFolder {
             folder_name,
             filter_rules,
             cache: Arc::new(RwLock::new(None)),
-            file_table: Arc::new(RwLock::new(Vec::new())),
-            conflict_table: Arc::new(RwLock::new(ConflictTable::new())),
+            file_list: Arc::new(RwLock::new(Vec::new())),
+            file_tracker: Arc::new(RwLock::new(FileTracker::new())),
             change_queue: Arc::new(RwLock::new(Vec::new())),
             errors: Arc::new(RwLock::new(Vec::new())),
             busy_lock: Arc::new(Mutex::new(())),
@@ -189,11 +192,9 @@ async fn recursive_search_file_intents(root_path: &str, curr_folder: &str, cache
 }
 
 fn check_folder_empty(path: &path::Path) -> bool {
-    for entry_res in walkdir::WalkDir::new(path) {
-        if let Ok(entry) = entry_res {
-            if entry.file_type().is_file() {
-                return false;
-            }
+    for entry in walkdir::WalkDir::new(path).into_iter().flatten() {
+        if entry.file_type().is_file() {
+            return false;
         }
     }
     true
@@ -203,7 +204,7 @@ impl AppFolder {
     pub async fn update_file_intents(&self) -> Option<()> {
         let _busy_lock = self.busy_lock.lock().await;
 
-        let mut new_file_table = Vec::<AppFile>::new();
+        let mut new_file_list = Vec::<AppFile>::new();
         {
             let cache_guard = self.cache.read().await;
             let cache = match cache_guard.as_ref() {
@@ -214,7 +215,7 @@ impl AppFolder {
                     return None;
                 },
             };
-            let res = recursive_search_file_intents(self.folder_path.as_str(), self.folder_path.as_str(), cache, &mut new_file_table, &self.filter_rules).await;
+            let res = recursive_search_file_intents(self.folder_path.as_str(), self.folder_path.as_str(), cache, &mut new_file_list, &self.filter_rules).await;
             if let Err(err) = res {
                 let message = format!("IO error while reading files for intent update: {}", err);
                 self.errors.write().await.push(message);
@@ -222,27 +223,25 @@ impl AppFolder {
             }
         }
 
-        new_file_table.sort_by(|a,b| {
+        new_file_list.sort_by(|a,b| {
             let a_name = a.src.as_str();
             let b_name = b.src.as_str();
             a_name.partial_cmp(b_name).unwrap_or(std::cmp::Ordering::Equal)
         });
         
         {
-            let (mut file_table, mut conflict_table, mut change_queue) = tokio::join!(
-                self.file_table.write(),
-                self.conflict_table.write(),
-                self.change_queue.write(),
+            let (mut file_list, mut file_tracker) = tokio::join!(
+                self.file_list.write(),
+                self.file_tracker.write(),
             );
 
-            *file_table = new_file_table;
-            conflict_table.clear();
-            change_queue.clear();
+            *file_list = new_file_list;
+            file_tracker.clear();
 
             // seed conflict table
-            for (index, file) in file_table.iter().enumerate() {
-                conflict_table.insert_existing_source(file.src.as_str(), index);
-                conflict_table.action_count[file.action] += 1usize;
+            for (index, file) in file_list.iter().enumerate() {
+                file_tracker.insert_existing_source(file.src.as_str(), index);
+                file_tracker.action_count[file.action] += 1usize;
             }
         }
 
@@ -256,7 +255,6 @@ impl AppFolder {
             }
         }
 
-        self.flush_file_changes().await;
         Some(())
     }
 
@@ -345,7 +343,7 @@ impl AppFolder {
             match cache_guard.as_ref() {
                 Some(cache) => cache.series.id,
                 None => {
-                    let message = format!("Couldn't refresh cache since it requires an existing loaded cache");
+                    let message = "Couldn't refresh cache since it requires an existing loaded cache".to_string();
                     self.errors.write().await.push(message);
                     return None;
                 },
@@ -362,7 +360,7 @@ impl AppFolder {
             let cache = match cache_guard.as_ref() {
                 Some(cache) => cache,
                 None => {
-                    let message = format!("Couldn't save cache to file since it is unloaded");
+                    let message = "Couldn't save cache to file since it is unloaded".to_string();
                     self.errors.write().await.push(message);
                     return None;
                 },
@@ -405,107 +403,6 @@ impl AppFolder {
             return None;
         }
         Some(())
-    }
-    
-    pub async fn flush_file_changes(&self) -> usize {
-        let (mut file_table, mut conflict_table, mut change_queue) = tokio::join!(
-            self.file_table.write(),
-            self.conflict_table.write(),
-            self.change_queue.write(),
-        );
-
-        let mut total_changes: usize = 0;
-        for file_change in change_queue.iter() {
-            match file_change {
-                AppFileChange::SetAction(index, new_action) => {
-                    let index = *index;
-                    let new_action = *new_action;
-                    let file = match file_table.get_mut(index) {
-                        Some(file) => file,
-                        None => continue,
-                    };
-
-                    let old_action = file.action;
-                    file.action = new_action;
-
-                    if old_action == new_action {
-                        continue;
-                    }
-
-                    conflict_table.action_count[old_action] -= 1usize;
-                    conflict_table.action_count[new_action] += 1usize;
-
-                    if !file.is_enabled {
-                        continue;
-                    };
-
-                    if old_action != Action::Rename && new_action != Action::Rename {
-                        continue;
-                    }
-
-                    if old_action == Action::Rename {
-                        conflict_table.remove_pending_write(file.dest.as_str(), index);
-                    } else {
-                        conflict_table.add_pending_write(file.dest.as_str(), index);
-                    };
-                    total_changes += 1;
-                },
-                AppFileChange::SetIsEnabled(index, new_is_enabled) => {
-                    let index = *index;
-                    let new_is_enabled = *new_is_enabled;
-                    let file = match file_table.get_mut(index) {
-                        Some(file) => file,
-                        None => continue,
-                    };
-
-                    let old_is_enabled = file.is_enabled;
-                    file.is_enabled = new_is_enabled;
-
-                    if old_is_enabled == new_is_enabled {
-                        continue;
-                    }
-
-                    if file.action != Action::Rename {
-                        continue;
-                    }
-
-                    if new_is_enabled {
-                        conflict_table.add_pending_write(file.dest.as_str(), index);
-                    } else {
-                        conflict_table.remove_pending_write(file.dest.as_str(), index);
-                    };
-                    total_changes += 1;
-                },
-                AppFileChange::SetDest(index, new_dest) => {
-                    let index = *index;
-                    let file = match file_table.get_mut(index) {
-                        Some(file) => file,
-                        None => continue,
-                    };
-
-                    if file.dest.as_str() == new_dest {
-                        continue
-                    }
-
-                    // We perform a .clear() and .push_str(...) to avoid a short lived clone
-                    if !file.is_enabled || file.action != Action::Rename {
-                        file.dest.clear();
-                        file.dest.push_str(new_dest.as_str());
-                        continue
-                    }
-
-                    conflict_table.remove_pending_write(file.dest.as_str(), index);
-                    conflict_table.add_pending_write(new_dest.as_str(), index);
-
-                    file.dest.clear();
-                    file.dest.push_str(new_dest.as_str());
-                    total_changes += 1;
-                },
-            }
-        }
-
-        change_queue.clear();
-        total_changes
     }
 
     pub async fn execute_file_changes(&self) {
@@ -562,14 +459,10 @@ impl AppFolder {
 
         let walker = walkdir::WalkDir::new(self.folder_path.as_str())
             .max_depth(1)
-            .follow_links(false); // Don't follow symbolic links
-                                  //
-        for entry_res in walker {
-            let entry = match entry_res {
-                Ok(entry) => entry,
-                Err(_) => continue,
-            };
-
+            .follow_links(false)
+            .into_iter()
+            .flatten(); 
+        for entry in walker {
             if !entry.file_type().is_dir() {
                 continue;
             }
@@ -603,8 +496,8 @@ impl AppFolder {
         self.folder_name.as_str() 
     }
 
-    pub fn get_conflict_table(&self) -> &Arc<RwLock<ConflictTable>> {
-        &self.conflict_table
+    pub fn get_file_tracker(&self) -> &Arc<RwLock<FileTracker>> {
+        &self.file_tracker
     }
 
     pub fn get_busy_lock(&self) -> &Arc<Mutex<()>> {
@@ -628,67 +521,150 @@ impl AppFolder {
     }
 
     pub async fn get_files(&self) -> AppFileImmutableContext {
-        let (file_table, conflict_table) = tokio::join!(
-            self.file_table.read(),
-            self.conflict_table.read(),
+        let (file_list, file_tracker) = tokio::join!(
+            self.file_list.read(),
+            self.file_tracker.read(),
         );
         AppFileImmutableContext {
-            file_table,
-            conflict_table,
+            file_list,
+            file_tracker,
         }
     }
 
     pub async fn get_mut_files(&self) -> AppFileMutableContext {
-        let (file_table, conflict_table, change_queue) = tokio::join!(
-            self.file_table.read(),
-            self.conflict_table.read(),
+        let (file_list, file_tracker, change_queue) = tokio::join!(
+            self.file_list.read(),
+            self.file_tracker.read(),
             self.change_queue.write(),
         );
-        AppFileMutableContext {
-            file_table,
-            conflict_table,
-            change_queue,
-        }
+        AppFileMutableContext { file_list, file_tracker, change_queue }
     }
     
     pub fn get_files_blocking(&self) -> AppFileImmutableContext {
-        let file_table = self.file_table.blocking_read();
-        let conflict_table = self.conflict_table.blocking_read();
-        AppFileImmutableContext {
-            file_table,
-            conflict_table,
-        }
+        let file_list = self.file_list.blocking_read();
+        let file_tracker = self.file_tracker.blocking_read();
+        AppFileImmutableContext { file_list, file_tracker }
     }
 
     pub fn get_mut_files_blocking(&self) -> AppFileMutableContext {
-        let file_table = self.file_table.blocking_read();
-        let conflict_table = self.conflict_table.blocking_read();
+        let file_list = self.file_list.blocking_read();
+        let file_tracker = self.file_tracker.blocking_read();
         let change_queue = self.change_queue.blocking_write();
-        AppFileMutableContext {
-            file_table,
-            conflict_table,
-            change_queue,
-        }
+        AppFileMutableContext { file_list, file_tracker, change_queue }
     }
     
     pub fn get_files_try_blocking(&self) -> Option<AppFileImmutableContext> {
-        let file_table = self.file_table.try_read().ok()?;
-        let conflict_table = self.conflict_table.try_read().ok()?;
-        Some(AppFileImmutableContext {
-            file_table,
-            conflict_table,
-        })
+        let file_list = self.file_list.try_read().ok()?;
+        let file_tracker = self.file_tracker.try_read().ok()?;
+        Some(AppFileImmutableContext { file_list, file_tracker })
     }
 
     pub fn get_mut_files_try_blocking(&self) -> Option<AppFileMutableContext> {
-        let file_table = self.file_table.try_read().ok()?;
-        let conflict_table = self.conflict_table.try_read().ok()?;
+        let file_list = self.file_list.try_read().ok()?;
+        let file_tracker = self.file_tracker.try_read().ok()?;
         let change_queue = self.change_queue.try_write().ok()?;
-        Some(AppFileMutableContext {
-            file_table,
-            conflict_table,
-            change_queue,
-        })
+        Some(AppFileMutableContext { file_list, file_tracker, change_queue })
+    }
+
+    pub async fn flush_file_changes(&self) -> usize {
+        let (mut file_table, mut conflict_table, mut change_queue) = tokio::join!(
+            self.file_list.write(),
+            self.file_tracker.write(),
+            self.change_queue.write(),
+        );
+
+        let mut total_changes: usize = 0;
+        for file_change in change_queue.iter() {
+            match file_change {
+                AppFileChange::SetAction(index, new_action) => {
+                    let index = *index;
+                    let new_action = *new_action;
+                    let file = match file_table.get_mut(index) {
+                        Some(file) => file,
+                        None => continue,
+                    };
+
+                    let old_action = file.action;
+                    file.action = new_action;
+
+                    if old_action == new_action {
+                        continue;
+                    }
+
+                    conflict_table.action_count[old_action] -= 1usize;
+                    conflict_table.action_count[new_action] += 1usize;
+
+                    if !file.is_enabled {
+                        continue;
+                    };
+
+                    if old_action != Action::Rename && new_action != Action::Rename {
+                        continue;
+                    }
+
+                    if old_action == Action::Rename {
+                        conflict_table.remove_pending_write(file.dest.as_str(), index);
+                    } else {
+                        conflict_table.add_pending_write(file.dest.as_str(), index);
+                    };
+                    total_changes += 1;
+                },
+                AppFileChange::IsEnabled(index, new_is_enabled) => {
+                    let index = *index;
+                    let new_is_enabled = *new_is_enabled;
+                    let file = match file_table.get_mut(index) {
+                        Some(file) => file,
+                        None => continue,
+                    };
+
+                    let old_is_enabled = file.is_enabled;
+                    file.is_enabled = new_is_enabled;
+
+                    if old_is_enabled == new_is_enabled {
+                        continue;
+                    }
+
+                    if file.action != Action::Rename {
+                        continue;
+                    }
+
+                    if new_is_enabled {
+                        conflict_table.add_pending_write(file.dest.as_str(), index);
+                    } else {
+                        conflict_table.remove_pending_write(file.dest.as_str(), index);
+                    };
+                    total_changes += 1;
+                },
+                AppFileChange::Destination(index, new_dest) => {
+                    let index = *index;
+                    let file = match file_table.get_mut(index) {
+                        Some(file) => file,
+                        None => continue,
+                    };
+
+                    if file.dest.as_str() == new_dest {
+                        continue
+                    }
+
+                    // We perform a .clear() and .push_str(...) to avoid a short lived clone
+                    if !file.is_enabled || file.action != Action::Rename {
+                        file.dest.clear();
+                        file.dest.push_str(new_dest.as_str());
+                        continue
+                    }
+
+                    conflict_table.remove_pending_write(file.dest.as_str(), index);
+                    conflict_table.add_pending_write(new_dest.as_str(), index);
+
+                    file.dest.clear();
+                    file.dest.push_str(new_dest.as_str());
+                    total_changes += 1;
+                },
+            }
+        }
+
+        change_queue.clear();
+        total_changes
     }
 }
 
@@ -745,37 +721,41 @@ macro_rules! generate_app_file_context_getters {
     ($name: ident) => {
         impl AppFileContextGetter for $name<'_> {
             fn get_src(&self, index: usize) -> &str {
-                self.file_table[index].src.as_str() 
+                self.file_list[index].src.as_str() 
             }
 
             fn get_src_descriptor(&self, index: usize) -> &Option<EpisodeKey> {
-                &self.file_table[index].src_descriptor
+                &self.file_list[index].src_descriptor
             }
 
             fn get_action(&self, index: usize) -> Action {
-                self.file_table[index].action
+                self.file_list[index].action
             }
 
             fn get_dest(&self, index: usize) -> &str {
-                self.file_table[index].dest.as_str()
+                self.file_list[index].dest.as_str()
             }
 
             fn get_is_enabled(&self, index: usize) -> bool {
-                self.file_table[index].is_enabled
+                self.file_list[index].is_enabled
             }
 
             fn get_is_conflict(&self, index: usize) -> bool {
-                let file = &self.file_table[index];
+                let file = &self.file_list[index];
                 if !file.is_enabled || file.action != Action::Rename {
                     return false;
                 }
-                self.conflict_table.check_if_write_conflicts(file.dest.as_str())
+                self.file_tracker.check_if_write_conflicts(file.dest.as_str())
             }
         }
 
         impl $name<'_> {
             pub fn get_total_items(&self) -> usize {
-                self.file_table.len()
+                self.file_list.len()
+            }
+
+            pub fn is_empty(&self) -> bool {
+                self.file_list.len() == 0
             }
 
             pub fn get_formatter(&self, index: usize) -> AppFileContextFormatter<$name<'_>> {
@@ -788,31 +768,26 @@ macro_rules! generate_app_file_context_getters {
     }
 }
 
-macro_rules! generate_app_file_context_setters {
-    ($name: ident) => {
-        impl AppFileContextSetter for $name<'_> {
-            fn set_action(&mut self, new_action: Action, index: usize) {
-                self.change_queue.push(AppFileChange::SetAction(index, new_action));
-                let file = &self.file_table[index];
-                // Automatically set destination to src is not set
-                if file.action != Action::Rename && new_action == Action::Rename && file.dest.len() == 0 {
-                    self.change_queue.push(AppFileChange::SetDest(index, file.src.to_owned())); 
-                }
-            }
-
-            fn set_is_enabled(&mut self, new_is_enabled: bool, index: usize) {
-                let change = AppFileChange::SetIsEnabled(index, new_is_enabled);
-                self.change_queue.push(change);
-            }
-
-            fn set_dest(&mut self, new_dest: String, index: usize) {
-                let change = AppFileChange::SetDest(index, new_dest);
-                self.change_queue.push(change);
-            }
-        }
-    }
-}
-
 generate_app_file_context_getters!(AppFileMutableContext);
 generate_app_file_context_getters!(AppFileImmutableContext);
-generate_app_file_context_setters!(AppFileMutableContext);
+
+impl AppFileMutableContext<'_> {
+    pub fn set_action(&mut self, new_action: Action, index: usize) {
+        self.change_queue.push(AppFileChange::SetAction(index, new_action));
+        let file = &self.file_list[index];
+        // Automatically set destination to src is not set
+        if file.action != Action::Rename && new_action == Action::Rename && file.dest.is_empty() {
+            self.change_queue.push(AppFileChange::Destination(index, file.src.to_owned())); 
+        }
+    }
+
+    pub fn set_is_enabled(&mut self, new_is_enabled: bool, index: usize) {
+        let change = AppFileChange::IsEnabled(index, new_is_enabled);
+        self.change_queue.push(change);
+    }
+
+    pub fn set_dest(&mut self, new_dest: String, index: usize) {
+        let change = AppFileChange::Destination(index, new_dest);
+        self.change_queue.push(change);
+    }
+}
