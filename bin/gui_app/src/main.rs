@@ -10,6 +10,8 @@ use tvdb::models::{Series, Episode};
 use std::sync::Arc;
 use std::path::Path;
 use open as cross_open;
+use lazy_static::lazy_static;
+use enum_map;
 
 struct FuzzySearcher {
     search_edit_line: String,
@@ -88,6 +90,16 @@ impl GuiApp {
     }
 }
 
+lazy_static! {
+    static ref ACTION_SHORTCUTS: enum_map::EnumMap<Action, egui::KeyboardShortcut> = enum_map::enum_map!{
+        Action::Delete => egui::KeyboardShortcut::new(egui::Modifiers::NONE, egui::Key::Delete),
+        Action::Ignore => egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::I),
+        Action::Rename => egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::R),
+        Action::Whitelist => egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::W),
+        Action::Complete => egui::KeyboardShortcut::new(egui::Modifiers::ALT, egui::Key::C),
+    };
+}
+
 fn render_search_bar(ui: &mut egui::Ui, search_bar: &mut FuzzySearcher) {
     ui.horizontal(|ui| {
         let res = ui.text_edit_singleline(&mut search_bar.search_edit_line);
@@ -125,6 +137,20 @@ fn render_errors_list(ui: &mut egui::Ui, errors: &mut Vec<String>) {
     });
 }
 
+fn check_file_shortcuts(ui: &mut egui::Ui, files: &mut AppFileMutableContext<'_>, index: usize) {
+    let current_action = files.get_action(index);
+    for action in Action::iterator() {
+        let action = *action;
+        if action == current_action {
+            continue;
+        }
+        let shortcut = &ACTION_SHORTCUTS[action];
+        if ui.input_mut(|i| i.consume_shortcut(shortcut)) {
+            files.set_action(action, index);
+        }
+    }
+}
+
 fn render_file_context_menu(
     gui: &mut GuiApp, ui: &mut egui::Ui, 
     folder_path: &str, files: &mut AppFileMutableContext<'_>, index: usize,
@@ -159,7 +185,12 @@ fn render_file_context_menu(
     
     for action in Action::iterator() {
         let action = *action;
-        if action != current_action && ui.button(action.to_str()).clicked() {
+        if action == current_action {
+            continue;
+        }
+        let button = egui::Button::new(action.to_str())
+            .shortcut_text(ui.ctx().format_shortcut(&ACTION_SHORTCUTS[action]));
+        if ui.add(button).clicked() {
             files.set_action(action, index);
             ui.close_menu();
         }
@@ -276,6 +307,9 @@ fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_ac
                             *folder.get_selected_descriptor().blocking_write() = *descriptor;
                         }
                     }
+                    if res.hovered() {
+                        check_file_shortcuts(ui, &mut files, index);
+                    }
                     res.context_menu(|ui| {
                         render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                     });
@@ -335,6 +369,9 @@ fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action:
                         } else {
                             *folder.get_selected_descriptor().blocking_write() = *descriptor;
                         }
+                    }
+                    if res.hovered() {
+                        check_file_shortcuts(ui, &mut files, index);
                     }
                     res.context_menu(|ui| {
                         render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
@@ -431,6 +468,9 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
                                         *folder.get_selected_descriptor().blocking_write() = *descriptor;
                                     }
                                 }
+                                if res.hovered() {
+                                    check_file_shortcuts(ui, &mut files, index);
+                                }
                                 res.context_menu(|ui| {
                                     render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                 });
@@ -514,6 +554,9 @@ fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
                                                 *folder.get_selected_descriptor().blocking_write() = *descriptor;
                                             }
                                         }
+                                        if res.hovered() {
+                                            check_file_shortcuts(ui, &mut files, index);
+                                        }
                                         res.context_menu(|ui| {
                                             render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                         });
@@ -537,6 +580,9 @@ fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
                                     row.col(|ui| {
                                         let src = files.get_src(index);
                                         let res = ui.selectable_label(false, src); 
+                                        if res.hovered() {
+                                            check_file_shortcuts(ui, &mut files, index);
+                                        }
                                         res.context_menu(|ui| {
                                             render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                         });
