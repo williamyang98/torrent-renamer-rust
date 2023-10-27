@@ -1,4 +1,3 @@
-use anyhow;
 use reqwest;
 use serde;
 use serde_json;
@@ -9,7 +8,6 @@ use tvdb::models::Series;
 use crate::file_intent::FilterRules;
 use crate::app_folder::AppFolder;
 use std::sync::Arc;
-use std::fmt;
 use thiserror;
 
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -17,14 +15,6 @@ pub struct Credentials {
     #[serde(rename="credentials")]
     pub login_info: tvdb::api::LoginInfo,     
     pub token: String,
-}
-
-#[derive(Debug, thiserror::Error)]
-pub struct LoggedOutError; 
-impl fmt::Display for LoggedOutError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{:?}", self)
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -53,6 +43,8 @@ pub struct App {
     series: Arc<RwLock<Option<Vec<Series>>>>,
     selected_series_index: Arc<RwLock<Option<usize>>>,
     series_busy_lock: Arc<Mutex<()>>,
+
+    errors: Arc<RwLock<Vec<String>>>,
 }
 
 impl App {
@@ -84,34 +76,77 @@ impl App {
             series: Arc::new(RwLock::new(None)),
             selected_series_index: Arc::new(RwLock::new(None)),
             series_busy_lock: Arc::new(Mutex::new(())),
+
+            errors: Arc::new(RwLock::new(Vec::new())),
         })
     }
 }
 
 impl App {
-    pub async fn login(&self) -> Result<(), anyhow::Error> {
-        let token = tvdb::api::login(self.client.as_ref(), &self.credentials.login_info).await?;
+    pub async fn login(&self) -> Option<()> {
+        let token = tvdb::api::login(self.client.as_ref(), &self.credentials.login_info).await;
+        let token = match token {
+            Ok(token) => token,
+            Err(err) => {
+                let message = format!("Error on tvdb api login: {}", err);
+                self.errors.write().await.push(message);
+                return None;
+            },
+        };
+
         let session = LoginSession::new(self.client.clone(), &token);
         *self.login_session.write().await = Some(Arc::new(session));
-        Ok(())
+        Some(())
     }
 
     pub fn get_login_session(&self) -> &Arc<RwLock<Option<Arc<LoginSession>>>> {
         &self.login_session
     }
 
-    pub async fn load_folders(&self, root_path: String) -> Result<(), anyhow::Error> {
+    pub async fn load_folders(&self, root_path: String) -> Option<()> {
         let _busy_lock = self.folders_busy_lock.lock().await;
 
         let mut new_folders = Vec::new();
-        let mut entries = tokio::fs::read_dir(root_path.as_str()).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            let file_type = entry.file_type().await?;
+        let entries = tokio::fs::read_dir(root_path.as_str()).await; 
+        let mut entries = match entries {
+            Ok(entries) => entries,
+            Err(err) => {
+                let message = format!("Error on loading folders from '{}': {}", root_path.as_str(), err);
+                self.errors.write().await.push(message);
+                return None;
+            },
+        };
+
+        loop {
+            let entry_opt = match entries.next_entry().await {
+                Ok(entry_opt) => entry_opt,
+                Err(err) => {
+                    let message = format!("Error during iteraton when getting next entry from folder '{}': {}", root_path.as_str(), err);
+                    self.errors.write().await.push(message);
+                    return None;
+                },
+            };
+
+            let entry = match entry_opt {
+                Some(entry) => entry,
+                None => break,
+            };
+
+            let path = entry.path();
+            let file_type = match entry.file_type().await {
+                Ok(file_type) => file_type,
+                Err(err) => {
+                    let path_str = path.to_str().unwrap_or(root_path.as_str());
+                    let message = format!("Error during iteration when getting file type from folder '{}': {}", path_str, err);
+                    self.errors.write().await.push(message);
+                    return None;
+                },
+            };
+
             if !file_type.is_dir() {
                 continue;
             }
 
-            let path = entry.path();
             if let Some(path) = path.to_str() {
                 let folder = AppFolder::new(root_path.as_str(), path, self.filter_rules.clone());
                 new_folders.push(Arc::new(folder));
@@ -134,14 +169,28 @@ impl App {
         *root_path_guard = root_path;
         *folders = new_folders;
         *selected_folder_index = None;
-        Ok(())
+        Some(())
     }
 
-    pub async fn update_search_series(&self, search: String) -> Result<(), anyhow::Error> {
+    pub async fn update_search_series(&self, search: String) -> Option<()> {
         let _busy_lock = self.series_busy_lock.lock().await;
         let login_session = self.login_session.read().await;
-        let session = login_session.as_ref().ok_or(LoggedOutError)?;
-        let search_results = session.search_series(&search).await?;
+        let session = match login_session.as_ref() {
+            Some(session) => session,
+            None => {
+                let message = "Login session is required to update the series search results";
+                self.errors.write().await.push(message.to_string());
+                return None;
+            },
+        };
+        let search_results = match session.search_series(&search).await {
+            Ok(results) => results,
+            Err(err) => {
+                let message = format!("Failed to get series search results due to api error: {}", err);
+                self.errors.write().await.push(message);
+                return None;
+            },
+        };
 
         let (mut series, mut series_index) = tokio::join!(
             self.series.write(),
@@ -149,7 +198,7 @@ impl App {
         );
         *series = Some(search_results);
         *series_index = None;
-        Ok(())
+        Some(())
     }
 
     pub async fn set_series_to_current_folder(&self, series_id: u32) -> Option<()> {
@@ -161,12 +210,20 @@ impl App {
 
         let session = match session_guard.as_ref() {
             Some(session) => session.clone(),
-            None => return Some(()),
+            None => {
+                let message = "Could not set update folder series from api since no login session exists";
+                self.errors.write().await.push(message.to_string());
+                return None;
+            },
         };
         
         let selected_index = match *selected_index_guard {
             Some(index) => index,
-            None => return Some(()),
+            None => {
+                let message = "Could not set update folder series from api since no folder is selected currently";
+                self.errors.write().await.push(message.to_string());
+                return None;
+            },
         };
 
         let folder = &folders_guard[selected_index];
@@ -174,7 +231,7 @@ impl App {
         drop(folders_guard);
         drop(selected_index_guard);
 
-        folder.load_cache_from_api(session, series_id).await?; 
+        folder.load_cache_from_api(session, series_id).await?;
         drop(session_guard);
 
         tokio::join!(
@@ -206,5 +263,9 @@ impl App {
 
     pub fn get_series_busy_lock(&self) -> &Arc<Mutex<()>> {
         &self.series_busy_lock
+    }
+
+    pub fn get_errors(&self) -> &Arc<RwLock<Vec<String>>> {
+        &self.errors
     }
 }

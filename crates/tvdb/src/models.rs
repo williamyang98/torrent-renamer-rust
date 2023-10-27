@@ -1,5 +1,7 @@
 use serde;
+use serde_with;
 
+#[serde_with::skip_serializing_none]
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Series {
     pub id: u32,
@@ -23,6 +25,7 @@ pub struct Series {
     pub language: Option<String>,
 }
 
+#[serde_with::skip_serializing_none]
 #[derive(serde::Deserialize, serde::Serialize, Debug, Clone)]
 pub struct Episode {
     pub id: u32,

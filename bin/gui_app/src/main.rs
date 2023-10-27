@@ -2,14 +2,61 @@ use tokio;
 use egui;
 use egui_extras::{Column, TableBuilder};
 use eframe;
-use tokio::sync::RwLockReadGuard;
 use app::app::App;
-use app::app_folder::{AppFolder, AppFileMutableContext, AppFileContextGetter, FileTracker};
+use app::app_folder::{AppFolder, AppFileMutableContext, AppFileContextGetter};
+use app::bookmarks::Bookmark;
 use app::file_intent::Action;
 use tvdb::models::{Series, Episode};
 use std::sync::Arc;
 use std::path::Path;
 use open as cross_open;
+
+struct FuzzySearcher {
+    search_edit_line: String,
+    search_edit_line_filtered: String,
+    input_edit_line_filtered: String,
+    char_blacklist: Vec<char>,
+}
+
+impl FuzzySearcher {
+    fn new() -> Self {
+        Self {
+            search_edit_line: "".to_owned(),
+            search_edit_line_filtered: "".to_owned(),
+            input_edit_line_filtered: "".to_owned(),
+            char_blacklist: vec!['.', '-', ' '],
+        }
+    }
+
+    fn update_search_filtered(&mut self) {
+        self.search_edit_line_filtered.clear();
+        for c in self.search_edit_line.chars() {
+            if self.char_blacklist.contains(&c) {
+                continue;
+            }
+            if c.is_ascii() {
+                self.search_edit_line_filtered.push(c.to_ascii_lowercase());
+            }
+        }
+    }
+
+    fn search(&mut self, input: &str) -> bool {
+        if self.search_edit_line_filtered.is_empty() {
+            return true;
+        }
+
+        self.input_edit_line_filtered.clear();
+        for c in input.chars() {
+            if self.char_blacklist.contains(&c) {
+                continue;
+            }
+            if c.is_ascii() {
+                self.input_edit_line_filtered.push(c.to_ascii_lowercase());
+            }
+        }
+        self.input_edit_line_filtered.contains(self.search_edit_line_filtered.as_str())
+    }
+}
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum FileTab {
@@ -20,9 +67,11 @@ enum FileTab {
 struct GuiApp {
     app: Arc<App>,
     runtime: tokio::runtime::Runtime,
-    show_series_search: bool,
-    series_search: String,
     selected_tab: FileTab,
+    show_series_search: bool,
+    series_api_search: String,
+    series_fuzzy_search: FuzzySearcher,
+    episodes_fuzzy_search: FuzzySearcher,
 }
 
 impl GuiApp {
@@ -31,23 +80,29 @@ impl GuiApp {
             app,
             runtime,
             show_series_search: false,
-            series_search: "".to_owned(),
             selected_tab: FileTab::FileAction(Action::Complete),
+            series_api_search: "".to_string(),
+            series_fuzzy_search: FuzzySearcher::new(),
+            episodes_fuzzy_search: FuzzySearcher::new(),
         }
     }
 }
 
-fn render_errors_list(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        let errors_guard = folder.get_errors().try_write();
-        let mut errors = match errors_guard {
-            Ok(errors) => errors,
-            Err(_) => {
-                ui.spinner();
-                return;
-            },
-        };
+fn render_search_bar(ui: &mut egui::Ui, search_bar: &mut FuzzySearcher) {
+    ui.horizontal(|ui| {
+        let res = ui.text_edit_singleline(&mut search_bar.search_edit_line);
+        if res.changed() {
+            search_bar.update_search_filtered();
+        }
+        if ui.button("Clear").clicked() {
+            search_bar.search_edit_line.clear();
+            search_bar.update_search_filtered();
+        }
+    });
+}
 
+fn render_errors_list(ui: &mut egui::Ui, errors: &mut Vec<String>) {
+    egui::ScrollArea::vertical().show(ui, |ui| {
         let total_items = errors.len();
         if total_items == 0 {
             ui.label("No errors");
@@ -111,11 +166,62 @@ fn render_file_context_menu(
     }
 }
 
+fn render_file_bookmarks(ui: &mut egui::Ui, bookmark: &mut Bookmark) -> bool {
+    let height = ui.text_style_height(&egui::TextStyle::Monospace);
+    let mut is_changed = false;
+    ui.horizontal(|ui| {
+        {
+            let value = &mut bookmark.is_favourite;
+            let label = egui::RichText::new("★").strong().size(height).color(
+                match value {
+                    true => egui::Color32::GOLD,
+                    false => egui::Color32::LIGHT_GRAY,
+                }
+            );
+            let elem = egui::Label::new(label).sense(egui::Sense::click());
+            if ui.add(elem).clicked() {
+                *value = !*value;
+                is_changed = true;
+            }
+        }
+        {
+            let value = &mut bookmark.is_unread;
+            let label = egui::RichText::new("？").strong().size(height).color(
+                match value {
+                    true => egui::Color32::DARK_RED,
+                    false => egui::Color32::LIGHT_GRAY,
+                }
+            );
+            let elem = egui::Label::new(label).sense(egui::Sense::click());
+            if ui.add(elem).clicked() {
+                *value = !*value;
+                is_changed = true;
+            }
+        }
+        {
+            let value = &mut bookmark.is_read;
+            let label = egui::RichText::new("✔").strong().size(height).color(
+                match value {
+                    true => egui::Color32::DARK_GREEN,
+                    false => egui::Color32::LIGHT_GRAY,
+                }
+            );
+            let elem = egui::Label::new(label).sense(egui::Sense::click());
+            if ui.add(elem).clicked() {
+                *value = !*value;
+                is_changed = true;
+            }
+        }
+    });
+    is_changed
+}
 
-fn render_files_selectable_list(
-    gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action,
-    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
-) {
+fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action, folder: &Arc<AppFolder>) {
+    let file_tracker = folder.get_file_tracker().blocking_read();
+    let mut files = folder.get_mut_files_blocking(); 
+    let mut bookmarks = folder.get_bookmarks().blocking_write();
+    let mut is_bookmarks_changed = false;
+
     if file_tracker.get_action_count()[selected_action] == 0 {
         ui.heading(format!("No {}s", selected_action.to_str().to_lowercase()));
         return;
@@ -128,6 +234,8 @@ fn render_files_selectable_list(
         is_select_all = ui.button("Select all").clicked();
         is_deselect_all = ui.button("Deselect all").clicked();
     });
+    
+    render_search_bar(ui, &mut gui.episodes_fuzzy_search);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
@@ -137,6 +245,11 @@ fn render_files_selectable_list(
                 if action != selected_action {
                     continue;
                 }
+                
+                if !gui.episodes_fuzzy_search.search(files.get_src(index)) {
+                    continue;
+                }
+
                 ui.horizontal(|ui| {
                     let mut is_enabled = files.get_is_enabled(index);
                     if ui.checkbox(&mut is_enabled, "").clicked() {
@@ -149,9 +262,12 @@ fn render_files_selectable_list(
                         files.set_is_enabled(false, index);
                     }
 
+                    let src = files.get_src(index);
+                    let bookmark = bookmarks.get_mut_with_insert(src);
+                    is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
+
                     let descriptor = files.get_src_descriptor(index);
                     let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                    let src = files.get_src(index);
                     let res = ui.selectable_label(is_selected, src);
                     if res.clicked() {
                         if is_selected {
@@ -161,22 +277,35 @@ fn render_files_selectable_list(
                         }
                     }
                     res.context_menu(|ui| {
-                        render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
+                        render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                     });
                 });
             }
         });
     });
+
+    if is_bookmarks_changed {
+        gui.runtime.spawn({
+            let folder = folder.clone();
+            async move {
+                folder.save_bookmarks_to_file().await
+            }
+        });
+    }
 }
 
-fn render_files_basic_list(
-    gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action,
-    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
-) {
+fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action, folder: &Arc<AppFolder>) {
+    let file_tracker = folder.get_file_tracker().blocking_read();
+    let mut files = folder.get_mut_files_blocking();
+    let mut bookmarks = folder.get_bookmarks().blocking_write();
+    let mut is_bookmarks_changed = false;
+
     if file_tracker.get_action_count()[selected_action] == 0 {
         ui.heading(format!("No {}s", selected_action.to_str().to_lowercase()));
         return;
     }
+
+    render_search_bar(ui, &mut gui.episodes_fuzzy_search);
 
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -187,30 +316,47 @@ fn render_files_basic_list(
                 if action != selected_action {
                     continue;
                 }
-                let descriptor = files.get_src_descriptor(index);
-                let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                let src = files.get_src(index);
-                
-                let res = ui.selectable_label(is_selected, src);
-                if res.clicked() {
-                    if is_selected {
-                        *folder.get_selected_descriptor().blocking_write() = None;
-                    } else {
-                        *folder.get_selected_descriptor().blocking_write() = *descriptor;
-                    }
+
+                if !gui.episodes_fuzzy_search.search(files.get_src(index)) {
+                    continue;
                 }
-                res.context_menu(|ui| {
-                    render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
+                
+                ui.horizontal(|ui| {
+                    let src = files.get_src(index);
+                    let bookmark = bookmarks.get_mut_with_insert(src);
+                    is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
+
+                    let descriptor = files.get_src_descriptor(index);
+                    let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                    let res = ui.selectable_label(is_selected, src);
+                    if res.clicked() {
+                        if is_selected {
+                            *folder.get_selected_descriptor().blocking_write() = None;
+                        } else {
+                            *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                        }
+                    }
+                    res.context_menu(|ui| {
+                        render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                    });
                 });
             }
         });
     });
+
+    if is_bookmarks_changed {
+        gui.runtime.spawn({
+            let folder = folder.clone();
+            async move {
+                folder.save_bookmarks_to_file().await
+            }
+        });
+    }
 }
 
-fn render_files_rename_list(
-    gui: &mut GuiApp, ui: &mut egui::Ui,
-    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
-) {
+fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let file_tracker = folder.get_file_tracker().blocking_read();
+    let mut files = folder.get_mut_files_blocking(); 
     if file_tracker.get_action_count()[Action::Rename] == 0 {
         ui.heading("No renames");
         return;
@@ -224,6 +370,8 @@ fn render_files_rename_list(
         is_select_all = ui.button("Select all").clicked();
         is_deselect_all = ui.button("Deselect all").clicked();
     });
+
+    render_search_bar(ui, &mut gui.episodes_fuzzy_search);
     
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Center).with_cross_justify(true);
@@ -245,6 +393,10 @@ fn render_files_rename_list(
                     for index in 0..files.get_total_items() {
                         let action = files.get_action(index);
                         if action != Action::Rename {
+                            continue;
+                        }
+
+                        if !gui.episodes_fuzzy_search.search(files.get_src(index)) {
                             continue;
                         }
 
@@ -280,7 +432,7 @@ fn render_files_rename_list(
                                     }
                                 }
                                 res.context_menu(|ui| {
-                                    render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
+                                    render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                 });
                             });
                             row.col(|ui| {
@@ -298,10 +450,9 @@ fn render_files_rename_list(
 
 }
 
-fn render_files_conflicts_list(
-    gui: &mut GuiApp, ui: &mut egui::Ui,
-    folder: &Arc<AppFolder>, files: &mut AppFileMutableContext<'_>, file_tracker: &RwLockReadGuard<FileTracker>, 
-) {
+fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let file_tracker = folder.get_file_tracker().blocking_read();
+    let mut files = folder.get_mut_files_blocking(); 
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     
     egui::ScrollArea::vertical().show(ui, |ui| {
@@ -364,7 +515,7 @@ fn render_files_conflicts_list(
                                             }
                                         }
                                         res.context_menu(|ui| {
-                                            render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
+                                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                         });
                                     });
                                     row.col(|_| {});
@@ -387,7 +538,7 @@ fn render_files_conflicts_list(
                                         let src = files.get_src(index);
                                         let res = ui.selectable_label(false, src); 
                                         res.context_menu(|ui| {
-                                            render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
+                                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                         });
                                     });
                                     row.col(|ui| {
@@ -411,7 +562,8 @@ fn render_files_conflicts_list(
     });
 }
 
-fn render_files_tab_bar(gui: &mut GuiApp, ui: &mut egui::Ui, file_tracker: &RwLockReadGuard<FileTracker>) {
+fn render_files_tab_bar(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let file_tracker = folder.get_file_tracker().blocking_read();
     let total_conflicts = {
         let mut total_conflicts = 0;
         for (dest, indices) in file_tracker.get_pending_writes() {
@@ -460,34 +612,15 @@ fn render_files_tab_bar(gui: &mut GuiApp, ui: &mut egui::Ui, file_tracker: &RwLo
 fn render_files_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     // Place all our lock guards in this scope so we can flush file changes afterwards
     {
-        let file_tracker = match folder.get_file_tracker().try_read() {
-            Ok(guard) => guard,
-            Err(_) => return,
-        };
-        
-        render_files_tab_bar(gui, ui, &file_tracker);
+        render_files_tab_bar(gui, ui, folder);
         ui.separator();
-        
-        let mut files = match folder.get_mut_files_try_blocking() {
-            Some(files) => files,
-            None => {
-                ui.spinner();
-                return;
-            },
-        };
-
-        if files.is_empty() {
-            ui.label("Empty folder");
-            return;
-        }
-
         match gui.selected_tab {
             FileTab::FileAction(action) => match action {
-                Action::Rename => render_files_rename_list(gui, ui, folder, &mut files, &file_tracker),
-                Action::Delete => render_files_selectable_list(gui, ui, action, folder, &mut files, &file_tracker),
-                _ => render_files_basic_list(gui, ui, action, folder, &mut files, &file_tracker),
+                Action::Rename => render_files_rename_list(gui, ui, folder),
+                Action::Delete => render_files_selectable_list(gui, ui, action, folder),
+                _ => render_files_basic_list(gui, ui, action, folder),
             },
-            FileTab::Conflicts => render_files_conflicts_list(gui, ui, folder, &mut files, &file_tracker),
+            FileTab::Conflicts => render_files_conflicts_list(gui, ui, folder),
         };
     }
     
@@ -536,15 +669,8 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
 }
 
 fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
-    let cache_guard = match folder.get_cache().try_read() {
-        Ok(guard) => guard,
-        Err(_) => {
-            ui.spinner();
-            return;
-        },
-    };
-
-    let cache = match cache_guard.as_ref() {
+    let cache = folder.get_cache().blocking_read();
+    let cache = match cache.as_ref() {
         Some(cache) => cache,
         None => {
             ui.label("No cache loaded");
@@ -595,43 +721,27 @@ fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
 }
 
 fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
-    let (folder, is_not_busy) = {
-        let folders = match gui.app.get_folders().try_read() {
-            Ok(folders) => folders,
-            Err(_) => {
-                ui.spinner();
-                return;
-            },
-        };
-
-        let selected_index = gui.app.get_selected_folder_index().blocking_read();
-        let selected_index = match *selected_index {
-            Some(index) => index,
-            None => {
-                ui.label("No folder selected");
-                return;
-            },
-        };
-
-        let folder = folders[selected_index].clone();
-        let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
-        (folder, is_not_busy)
+    let folders = gui.app.get_folders().blocking_read();
+    let folder_index = *gui.app.get_selected_folder_index().blocking_read();
+    let folder_index = match folder_index {
+        Some(index) => index,
+        None => {
+            ui.label("No folder selected");
+            return;
+        },
     };
-    
-    if !*folder.get_is_initial_load().blocking_read() {
-        gui.runtime.spawn({
-            let folder = folder.clone();
-            async move {
-                *folder.get_is_initial_load().write().await = true;
-                if folder.is_cache_loaded().await {
-                    return Some(());
-                }
-                folder.load_cache_from_file().await?;
-                folder.update_file_intents().await
-            }
-        });
-    }
 
+    let folder = folders[folder_index].clone();
+    drop(folders);
+    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
+
+    gui.runtime.spawn({
+        let folder = folder.clone();
+        async move {
+            folder.perform_initial_load().await
+        }
+    });
+    
     egui::TopBottomPanel::top("folder_controls")
         .resizable(false)
         .show_inside(ui, |ui| {
@@ -643,7 +753,11 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
     egui::TopBottomPanel::bottom("folder_error_list")
         .resizable(true)
         .show_inside(ui, |ui| {
-            render_errors_list(ui, &folder);
+            if let Ok(mut errors) = folder.get_errors().try_write() {
+                render_errors_list(ui, errors.as_mut());
+            } else {
+                ui.spinner();
+            }
         });
 
     egui::SidePanel::right("folder_info")
@@ -669,14 +783,7 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
 }
 
 fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
-    let folders = match gui.app.get_folders().try_read() {
-        Ok(folders) => folders,
-        Err(_) => {
-            ui.spinner();
-            return;
-        },
-    };
-
+    let folders = gui.app.get_folders().blocking_read();
     ui.heading(format!("Folders ({})", folders.len()));
     if gui.app.get_folders_busy_lock().try_lock().is_err() {
         ui.spinner();
@@ -726,14 +833,7 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         return;
     }
 
-    let series = match gui.app.get_series().try_read() {
-        Ok(series) => series,
-        Err(_) => {
-            ui.spinner();
-            return;
-        },
-    };
-
+    let series = gui.app.get_series().blocking_read();
     let series = match series.as_ref() {
         Some(series) => series,
         None => {
@@ -746,6 +846,8 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         ui.label("Search gave no results");
         return;
     }
+
+    render_search_bar(ui, &mut gui.series_fuzzy_search);
 
     let row_height = 18.0;
     TableBuilder::new(ui)
@@ -765,6 +867,10 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         .body(|mut body| {
             let selected_index = *gui.app.get_selected_series_index().blocking_read();
             for (index, entry) in series.iter().enumerate() {
+                if !gui.series_fuzzy_search.search(entry.name.as_str()) {
+                    continue;
+                }
+
                 body.row(row_height, |mut row| {
                     row.col(|ui| { 
                         let is_selected = Some(index) == selected_index;
@@ -916,12 +1022,12 @@ fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context
             let is_not_busy = gui.app.get_series_busy_lock().try_lock().is_ok();
             ui.add_enabled_ui(is_not_busy, |ui| {
                 ui.horizontal(|ui| {
-                    let res = ui.text_edit_singleline(&mut gui.series_search);
+                    let res = ui.text_edit_singleline(&mut gui.series_api_search);
                     let is_pressed = ui.button("Search").clicked();
                     let is_entered = res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
                     if is_pressed || is_entered {
                         gui.runtime.spawn({
-                            let series_search = gui.series_search.clone();
+                            let series_search = gui.series_api_search.clone();
                             let app = gui.app.clone();
                             async move {
                                 app.update_search_series(series_search).await
@@ -1054,10 +1160,11 @@ fn main() -> Result<(), eframe::Error> {
                 runtime.spawn({
                     let app = app.clone();
                     async move {
-                        tokio::join!(
+                        let (res_0, res_1) = tokio::join!(
                             app.load_folders(root_path),
                             app.login(),
-                        )
+                        );
+                        res_0.or(res_1)
                     }
                 });
 

@@ -13,6 +13,7 @@ use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use enum_map;
 use crate::app_folder_cache::{EpisodeKey, AppFolderCache};
 use crate::file_intent::{FilterRules, Action, get_file_intent};
+use crate::bookmarks::{BookmarkTable, deserialize_bookmarks, serialize_bookmarks};
 
 const PATH_STR_BOOKMARKS: &str = "bookmarks.json";
 const PATH_STR_EPISODES_DATA: &str = "episodes.json";
@@ -55,6 +56,10 @@ pub struct AppFileMutableContext<'a> {
 pub struct AppFolder {
     folder_path: String,
     folder_name: String,
+    bookmarks_path: String,
+    series_path: String,
+    episodes_path: String,
+
     filter_rules: Arc<FilterRules>,
     cache: Arc<RwLock<Option<AppFolderCache>>>,
 
@@ -62,10 +67,12 @@ pub struct AppFolder {
     file_tracker: Arc<RwLock<FileTracker>>,
     change_queue: Arc<RwLock<Vec<AppFileChange>>>,
 
+    bookmarks: Arc<RwLock<BookmarkTable>>,
+
     errors: Arc<RwLock<Vec<String>>>,
     busy_lock: Arc<Mutex<()>>,
     selected_descriptor: Arc<RwLock<Option<EpisodeKey>>>,
-    is_initial_load: Arc<RwLock<bool>>,
+    is_initial_load: Arc<Mutex<bool>>,
 }
 
 impl FileTracker {
@@ -139,18 +146,30 @@ impl AppFolder {
             Err(_) => folder_path.to_string(),
         };
 
+        let series_path = path::Path::new(folder_path).join(PATH_STR_SERIES_DATA).to_string_lossy().to_string();
+        let episodes_path = path::Path::new(folder_path).join(PATH_STR_EPISODES_DATA).to_string_lossy().to_string();
+        let bookmarks_path = path::Path::new(folder_path).join(PATH_STR_BOOKMARKS).to_string_lossy().to_string();
+
         Self {
             folder_path: folder_path.to_string(),
             folder_name,
+            series_path,
+            episodes_path,
+            bookmarks_path,
+
             filter_rules,
             cache: Arc::new(RwLock::new(None)),
+
             file_list: Arc::new(RwLock::new(Vec::new())),
             file_tracker: Arc::new(RwLock::new(FileTracker::new())),
             change_queue: Arc::new(RwLock::new(Vec::new())),
+
+            bookmarks: Arc::new(RwLock::new(BookmarkTable::new())),
+
             errors: Arc::new(RwLock::new(Vec::new())),
             busy_lock: Arc::new(Mutex::new(())),
             selected_descriptor: Arc::new(RwLock::new(None)),
-            is_initial_load: Arc::new(RwLock::new(false)),
+            is_initial_load: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -201,6 +220,71 @@ fn check_folder_empty(path: &path::Path) -> bool {
 }
 
 impl AppFolder {
+    pub async fn perform_initial_load(&self) -> Option<()> {
+        let mut is_loaded = self.is_initial_load.lock().await;
+        if *is_loaded {
+            return None;
+        }
+        *is_loaded = true;
+        let (res_0, res_1) = tokio::join!(
+            async {
+                self.load_cache_from_file().await?;
+                self.update_file_intents().await
+            },
+            self.load_bookmarks_from_file(),
+        );
+        res_0.or(res_1)
+    }
+
+    pub async fn load_bookmarks_from_file(&self) -> Option<()> {
+        let bookmarks_data = tokio::fs::read_to_string(self.bookmarks_path.as_str()).await;
+        if let Err(err) = bookmarks_data.as_ref() {
+            let message = format!("IO while reading bookmarks: {}", err);
+            self.errors.write().await.push(message);
+        }
+
+        let bookmarks_data = bookmarks_data.as_ref().ok()?;
+
+        let bookmarks = match deserialize_bookmarks(bookmarks_data.as_str()) {
+            Ok(bookmarks) => bookmarks,
+            Err(err) => {
+                let message = format!("JSON decoding error reading bookmarks from file: {}", err); 
+                self.errors.write().await.push(message);
+                return None;
+            },
+        };
+
+        *self.bookmarks.write().await = bookmarks;
+        Some(())
+    }
+
+    pub async fn save_bookmarks_to_file(&self) -> Option<()> {
+        let bookmarks_data = {
+            let bookmarks = self.bookmarks.read().await;
+            serialize_bookmarks(&bookmarks)
+        };
+
+        if let Err(err) = bookmarks_data.as_ref() {
+            let message = format!("JSON encoding error writing bookmarks to file: {}", err);
+            self.errors.write().await.push(message);
+            return None;
+        }
+
+        let bookmarks_data = bookmarks_data.as_ref().ok()?;
+        let res = tokio::fs::write(self.bookmarks_path.as_str(), bookmarks_data).await;
+
+        if let Err(err) = res {
+            let message = format!("IO error while writing bookmarks to file: {}", err);
+            self.errors.write().await.push(message);
+            return None;
+        };
+        Some(())
+    }
+
+    pub fn get_bookmarks(&self) -> &Arc<RwLock<BookmarkTable>> {
+        &self.bookmarks
+    }
+
     pub async fn update_file_intents(&self) -> Option<()> {
         let _busy_lock = self.busy_lock.lock().await;
 
@@ -215,7 +299,10 @@ impl AppFolder {
                     return None;
                 },
             };
-            let res = recursive_search_file_intents(self.folder_path.as_str(), self.folder_path.as_str(), cache, &mut new_file_list, &self.filter_rules).await;
+            let res = recursive_search_file_intents(
+                self.folder_path.as_str(), self.folder_path.as_str(), cache, 
+                &mut new_file_list, &self.filter_rules,
+            ).await;
             if let Err(err) = res {
                 let message = format!("IO error while reading files for intent update: {}", err);
                 self.errors.write().await.push(message);
@@ -230,10 +317,8 @@ impl AppFolder {
         });
         
         {
-            let (mut file_list, mut file_tracker) = tokio::join!(
-                self.file_list.write(),
-                self.file_tracker.write(),
-            );
+            let mut file_list = self.file_list.write().await;
+            let mut file_tracker = self.file_tracker.write().await;
 
             *file_list = new_file_list;
             file_tracker.clear();
@@ -254,16 +339,21 @@ impl AppFolder {
                 }
             }
         }
-
+        
+        self.flush_file_changes().await;
         Some(())
+    }
+
+    pub async fn is_cache_loaded(&self) -> bool {
+        self.cache.read().await.is_some()
     }
 
     pub async fn load_cache_from_file(&self) -> Option<()> {
         let _busy_lock = self.busy_lock.lock().await;
 
         let (series_data, episodes_data) = tokio::join!(
-            tokio::fs::read_to_string(format!("{}/{}", self.folder_path, PATH_STR_SERIES_DATA)),
-            tokio::fs::read_to_string(format!("{}/{}", self.folder_path, PATH_STR_EPISODES_DATA))
+            tokio::fs::read_to_string(self.series_path.as_str()),
+            tokio::fs::read_to_string(self.episodes_path.as_str())
         );
         
         if let Err(err) = series_data.as_ref() {
@@ -300,10 +390,6 @@ impl AppFolder {
         let mut cache = self.cache.write().await;
         *cache = Some(AppFolderCache::new(series, episodes));
         Some(())
-    }
-
-    pub async fn is_cache_loaded(&self) -> bool {
-        self.cache.read().await.is_some()
     }
 
     pub async fn load_cache_from_api(&self, session: Arc<LoginSession>, series_id: u32) -> Option<()> {
@@ -385,8 +471,8 @@ impl AppFolder {
         };
 
         let (res_0, res_1) = tokio::join!(
-            tokio::fs::write(format!("{}/{}", self.folder_path, PATH_STR_SERIES_DATA), series_str),
-            tokio::fs::write(format!("{}/{}", self.folder_path, PATH_STR_EPISODES_DATA), episodes_str),
+            tokio::fs::write(self.series_path.as_str(), series_str),
+            tokio::fs::write(self.episodes_path.as_str(), episodes_str),
         );
 
         if let Err(err) = res_0.as_ref() {
@@ -512,19 +598,13 @@ impl AppFolder {
         &self.selected_descriptor
     }
 
-    pub fn get_is_initial_load(&self) -> &Arc<RwLock<bool>> {
-        &self.is_initial_load
-    }
-    
     pub fn get_cache(&self) -> &Arc<RwLock<Option<AppFolderCache>>> {
         &self.cache
     }
 
     pub async fn get_files(&self) -> AppFileImmutableContext {
-        let (file_list, file_tracker) = tokio::join!(
-            self.file_list.read(),
-            self.file_tracker.read(),
-        );
+        let file_list = self.file_list.read().await;
+        let file_tracker = self.file_tracker.read().await;
         AppFileImmutableContext {
             file_list,
             file_tracker,
@@ -532,11 +612,9 @@ impl AppFolder {
     }
 
     pub async fn get_mut_files(&self) -> AppFileMutableContext {
-        let (file_list, file_tracker, change_queue) = tokio::join!(
-            self.file_list.read(),
-            self.file_tracker.read(),
-            self.change_queue.write(),
-        );
+        let file_list = self.file_list.read().await;
+        let file_tracker = self.file_tracker.read().await;
+        let change_queue = self.change_queue.write().await;
         AppFileMutableContext { file_list, file_tracker, change_queue }
     }
     
@@ -567,11 +645,9 @@ impl AppFolder {
     }
 
     pub async fn flush_file_changes(&self) -> usize {
-        let (file_list, file_tracker, change_queue) = tokio::join!(
-            self.file_list.write(),
-            self.file_tracker.write(),
-            self.change_queue.write(),
-        );
+        let file_list = self.file_list.write().await;
+        let file_tracker = self.file_tracker.write().await;
+        let change_queue = self.change_queue.write().await;
         flush_file_changes_acquired(file_list, file_tracker, change_queue)
     }
 
