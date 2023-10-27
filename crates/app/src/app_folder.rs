@@ -770,6 +770,10 @@ impl AppFileMutableContext<'_> {
         if file.action != Action::Rename && new_action == Action::Rename && file.dest.is_empty() {
             self.change_queue.push(AppFileChange::Destination(index, file.src.to_owned())); 
         }
+        // Automatically disable enabled if we are deleting it
+        if new_action == Action::Delete {
+            self.change_queue.push(AppFileChange::IsEnabled(index, false));
+        }
     }
 
     pub fn set_is_enabled(&mut self, new_is_enabled: bool, index: usize) {
