@@ -17,10 +17,10 @@ impl Action {
     pub fn iterator() -> std::slice::Iter<'static, Self> {
         static ACTIONS: [Action;5] = [
             Action::Rename,
-            Action::Complete,
-            Action::Ignore,
             Action::Delete,
+            Action::Ignore,
             Action::Whitelist,
+            Action::Complete,
         ];
         ACTIONS.iter() 
     }
