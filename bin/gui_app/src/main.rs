@@ -74,6 +74,7 @@ struct GuiApp {
     series_api_search: String,
     series_fuzzy_search: FuzzySearcher,
     episodes_fuzzy_search: FuzzySearcher,
+    folders_fuzzy_search: FuzzySearcher,
 }
 
 impl GuiApp {
@@ -86,6 +87,7 @@ impl GuiApp {
             series_api_search: "".to_string(),
             series_fuzzy_search: FuzzySearcher::new(),
             episodes_fuzzy_search: FuzzySearcher::new(),
+            folders_fuzzy_search: FuzzySearcher::new(),
         }
     }
 }
@@ -840,13 +842,19 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
         ui.label("No folders");
         return;
     }
+
+    render_search_bar(ui, &mut gui.folders_fuzzy_search);
     
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
             let selected_index = *gui.app.get_selected_folder_index().blocking_read();
             for (index, folder) in folders.iter().enumerate() {
-                let label = folder.get_folder_name().to_string();
+                let label = folder.get_folder_name();
+                if !gui.folders_fuzzy_search.search(label) {
+                    continue;
+                }
+
                 let mut is_selected = selected_index == Some(index);
                 let res = ui.toggle_value(&mut is_selected, label);
                 if res.clicked() {
