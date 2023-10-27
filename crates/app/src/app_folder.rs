@@ -1,7 +1,7 @@
 use async_recursion;
 use futures;
-use serde_json;
 use std::collections::{HashMap,HashSet};
+use serde_json;
 use std::sync::Arc;
 use std::fmt;
 use tvdb::models::{Episode, Series};
@@ -18,6 +18,35 @@ use crate::bookmarks::{BookmarkTable, deserialize_bookmarks, serialize_bookmarks
 const PATH_STR_BOOKMARKS: &str = "bookmarks.json";
 const PATH_STR_EPISODES_DATA: &str = "episodes.json";
 const PATH_STR_SERIES_DATA: &str = "series.json";
+
+#[derive(Debug, Eq, PartialEq, Copy, Clone, enum_map::Enum)]
+pub enum FolderStatus {
+    Unknown,
+    Empty,
+    Pending,
+    Done,
+}
+
+impl FolderStatus {
+    pub fn iterator() -> std::slice::Iter<'static, Self> {
+        static STATUS: [FolderStatus;4] = [
+            FolderStatus::Unknown,
+            FolderStatus::Empty,
+            FolderStatus::Pending,
+            FolderStatus::Done,
+        ];
+        STATUS.iter()
+    }   
+
+    pub fn to_str(&self) -> &'static str {
+        match self {
+            FolderStatus::Unknown => "Unknown",
+            FolderStatus::Empty => "Empty",
+            FolderStatus::Pending => "Pending",
+            FolderStatus::Done => "Done",
+        }
+    }
+}
 
 pub struct FileTracker {
     pending_writes: HashMap<String, HashSet<usize>>,
@@ -73,6 +102,7 @@ pub struct AppFolder {
     busy_lock: Arc<Mutex<()>>,
     selected_descriptor: Arc<RwLock<Option<EpisodeKey>>>,
     is_initial_load: Arc<Mutex<bool>>,
+    is_file_count_init: Arc<Mutex<bool>>,
 }
 
 impl FileTracker {
@@ -170,6 +200,7 @@ impl AppFolder {
             busy_lock: Arc::new(Mutex::new(())),
             selected_descriptor: Arc::new(RwLock::new(None)),
             is_initial_load: Arc::new(Mutex::new(false)),
+            is_file_count_init: Arc::new(Mutex::new(false)),
         }
     }
 }
@@ -221,11 +252,13 @@ fn check_folder_empty(path: &path::Path) -> bool {
 
 impl AppFolder {
     pub async fn perform_initial_load(&self) -> Option<()> {
-        let mut is_loaded = self.is_initial_load.lock().await;
-        if *is_loaded {
-            return None;
+        {
+            let mut is_loaded = self.is_initial_load.lock().await;
+            if *is_loaded {
+                return None;
+            }
+            *is_loaded = true;
         }
-        *is_loaded = true;
         let (res_0, res_1) = tokio::join!(
             async {
                 self.load_cache_from_file().await?;
@@ -234,6 +267,32 @@ impl AppFolder {
             self.load_bookmarks_from_file(),
         );
         res_0.or(res_1)
+    }
+
+    pub fn get_folder_status(&self) -> FolderStatus {
+        if !*self.is_file_count_init.blocking_lock() {
+            return FolderStatus::Unknown; 
+        }
+
+        let action_count = &self.file_tracker.as_ref().blocking_read().action_count;
+        let file_count = Action::iterator()
+            .map(|action| action_count[*action])
+            .reduce(|acc, v| acc + v);
+        let file_count = match file_count {
+            Some(count) => count,
+            None => return FolderStatus::Unknown,
+        };
+        
+        if file_count == 0 {
+            return FolderStatus::Empty;
+        }
+
+        let pending_count = action_count[Action::Delete] + action_count[Action::Rename];
+        if pending_count > 0 {
+            return FolderStatus::Pending;
+        }
+
+        FolderStatus::Done
     }
 
     pub async fn load_bookmarks_from_file(&self) -> Option<()> {
@@ -341,6 +400,7 @@ impl AppFolder {
         }
         
         self.flush_file_changes().await;
+        *self.is_file_count_init.lock().await = true;
         Some(())
     }
 

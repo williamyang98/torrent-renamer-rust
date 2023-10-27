@@ -3,7 +3,7 @@ use egui;
 use egui_extras::{Column, TableBuilder};
 use eframe;
 use app::app::App;
-use app::app_folder::{AppFolder, AppFileMutableContext, AppFileContextGetter};
+use app::app_folder::{AppFolder, AppFileMutableContext, AppFileContextGetter, FolderStatus};
 use app::bookmarks::Bookmark;
 use app::file_intent::Action;
 use tvdb::models::{Series, Episode};
@@ -75,6 +75,7 @@ struct GuiApp {
     series_fuzzy_search: FuzzySearcher,
     episodes_fuzzy_search: FuzzySearcher,
     folders_fuzzy_search: FuzzySearcher,
+    folders_filter: enum_map::EnumMap<FolderStatus, bool>,
 }
 
 impl GuiApp {
@@ -88,6 +89,7 @@ impl GuiApp {
             series_fuzzy_search: FuzzySearcher::new(),
             episodes_fuzzy_search: FuzzySearcher::new(),
             folders_fuzzy_search: FuzzySearcher::new(),
+            folders_filter: enum_map::enum_map! { _ => true },
         }
     }
 }
@@ -830,20 +832,80 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
         });
 }
 
+fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus) {
+    match status {
+        FolderStatus::Unknown => {
+            ui.label("U");
+        },
+        FolderStatus::Empty => {
+            ui.label("E");
+        },
+        FolderStatus::Pending => {
+            ui.label("P");
+        },
+        FolderStatus::Done => {
+            let label = egui::RichText::new("✔").strong().color(egui::Color32::DARK_GREEN);
+            ui.add(egui::Label::new(label));
+        },
+    };
+}
+
 fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
     let folders = gui.app.get_folders().blocking_read();
     ui.heading(format!("Folders ({})", folders.len()));
-    if gui.app.get_folders_busy_lock().try_lock().is_err() {
-        ui.spinner();
-        return;
-    }
 
+
+    let is_busy = gui.app.get_folders_busy_lock().try_lock().is_err();
     if folders.is_empty() {
-        ui.label("No folders");
+        if is_busy {
+            ui.spinner();
+        } else {
+            ui.label("No folders");
+        }
         return;
     }
 
     render_search_bar(ui, &mut gui.folders_fuzzy_search);
+
+
+    let total_folders = folders.len();
+    let mut status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
+    let mut total_busy_folders = 0;
+    for folder in folders.iter() {
+        let status = folder.get_folder_status();
+        status_counts[status] += 1; 
+        if folder.get_busy_lock().try_lock().is_err() {
+            total_busy_folders += 1;
+        }
+    }
+    for status in FolderStatus::iterator() {
+        let status = *status;
+        let flag = &mut gui.folders_filter[status];
+        ui.checkbox(flag, format!("{} ({})", status.to_str(), status_counts[status]));
+    }
+    ui.label(format!("Busy ({}/{})", total_busy_folders, total_folders));
+    
+    ui.add_enabled_ui(!is_busy, |ui| {
+        ui.horizontal(|ui| {
+            if ui.button("Refresh all").clicked() {
+                gui.runtime.spawn({
+                    let app = gui.app.clone();
+                    async move {
+                        app.update_file_intents_for_all_folders().await
+                    }
+                });
+            }
+            if ui.button("Reload structure").clicked() {
+                gui.runtime.spawn({
+                    let app = gui.app.clone();
+                    async move {
+                        app.load_folders_from_existing_root_path().await
+                    }
+                });
+            }
+        });
+    });
+    
     
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
@@ -855,26 +917,35 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
                     continue;
                 }
 
-                let mut is_selected = selected_index == Some(index);
-                let res = ui.toggle_value(&mut is_selected, label);
-                if res.clicked() {
-                    let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
-                    if !is_selected {
-                        *selected_index = None;
-                    } else {
-                        *selected_index = Some(index);
-                    }
+                let status = folder.get_folder_status();
+                if !gui.folders_filter[status] {
+                    continue;
                 }
-                res.context_menu(|ui| {
-                    if ui.button("Open folder").clicked() {
-                        gui.runtime.spawn({
-                            let folder_path_str = folder.get_folder_path().to_string();
-                            async move {
-                                cross_open::that(folder_path_str)
-                            }
-                        });
-                        ui.close_menu();
+
+                ui.horizontal(|ui| {
+                    render_folder_status(ui, status);
+
+                    let mut is_selected = selected_index == Some(index);
+                    let res = ui.toggle_value(&mut is_selected, label);
+                    if res.clicked() {
+                        let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
+                        if !is_selected {
+                            *selected_index = None;
+                        } else {
+                            *selected_index = Some(index);
+                        }
                     }
+                    res.context_menu(|ui| {
+                        if ui.button("Open folder").clicked() {
+                            gui.runtime.spawn({
+                                let folder_path_str = folder.get_folder_path().to_string();
+                                async move {
+                                    cross_open::that(folder_path_str)
+                                }
+                            });
+                            ui.close_menu();
+                        }
+                    });
                 });
             }
         });

@@ -103,6 +103,11 @@ impl App {
         &self.login_session
     }
 
+    pub async fn load_folders_from_existing_root_path(&self) -> Option<()> {
+        let path = self.root_path.read().await.clone();
+        self.load_folders(path).await
+    }
+
     pub async fn load_folders(&self, root_path: String) -> Option<()> {
         let _busy_lock = self.folders_busy_lock.lock().await;
 
@@ -238,6 +243,27 @@ impl App {
             folder.update_file_intents(),
             folder.save_cache_to_file(),
         );
+        Some(())
+    }
+
+    pub async fn update_file_intents_for_all_folders(&self) -> Option<()> {
+        // Allow the folder to be read while it is busy
+        // Disallow load_folders(...) while we are performing an update on all folders
+        let _busy_lock = self.folders_busy_lock.lock().await;
+        let mut tasks = Vec::new();
+        {
+            let folders = self.folders.as_ref().read().await;
+            for folder in folders.iter() {
+                let folder = folder.clone();
+                let task = async move {
+                    if folder.perform_initial_load().await == None {
+                        folder.update_file_intents().await;
+                    }
+                };
+                tasks.push(task);
+            }
+        }
+        let _ = futures::future::join_all(tasks).await;
         Some(())
     }
 
