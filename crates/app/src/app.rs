@@ -44,7 +44,8 @@ pub struct App {
     credentials: Credentials,
     client: Arc<reqwest::Client>,
     login_session: Arc<RwLock<Option<Arc<LoginSession>>>>,
-
+    
+    root_path: Arc<RwLock<String>>,
     folders: Arc<RwLock<Vec<Arc<AppFolder>>>>,
     selected_folder_index: Arc<RwLock<Option<usize>>>,
     folders_busy_lock: Arc<Mutex<()>>,
@@ -74,7 +75,8 @@ impl App {
             credentials,
             client: Arc::new(reqwest::Client::new()),
             login_session: Arc::new(RwLock::new(None)),
-
+            
+            root_path: Arc::new(RwLock::new(".".to_string())),
             folders: Arc::new(RwLock::new(Vec::new())),
             selected_folder_index: Arc::new(RwLock::new(None)),
             folders_busy_lock: Arc::new(Mutex::new(())),
@@ -98,11 +100,11 @@ impl App {
         &self.login_session
     }
 
-    pub async fn open_folders(&self, root_path: &str) -> Result<(), anyhow::Error> {
+    pub async fn load_folders(&self, root_path: String) -> Result<(), anyhow::Error> {
         let _busy_lock = self.folders_busy_lock.lock().await;
 
         let mut new_folders = Vec::new();
-        let mut entries = tokio::fs::read_dir(root_path).await?;
+        let mut entries = tokio::fs::read_dir(root_path.as_str()).await?;
         while let Some(entry) = entries.next_entry().await? {
             let file_type = entry.file_type().await?;
             if !file_type.is_dir() {
@@ -111,7 +113,7 @@ impl App {
 
             let path = entry.path();
             if let Some(path) = path.to_str() {
-                let folder = AppFolder::new(root_path, path, self.filter_rules.clone());
+                let folder = AppFolder::new(root_path.as_str(), path, self.filter_rules.clone());
                 new_folders.push(Arc::new(folder));
             }
         }
@@ -124,37 +126,15 @@ impl App {
             a_name.partial_cmp(b_name).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let (mut folders, mut selected_folder_index) = tokio::join!(
+        let (mut root_path_guard, mut folders, mut selected_folder_index) = tokio::join!(
+            self.root_path.write(),
             self.folders.write(),
             self.selected_folder_index.write(),
         );
+        *root_path_guard = root_path;
         *folders = new_folders;
         *selected_folder_index = None;
         Ok(())
-    }
-
-    pub fn get_folders_busy_lock(&self) -> &Arc<Mutex<()>> {
-        &self.folders_busy_lock
-    }
-
-    pub fn get_folders(&self) -> &Arc<RwLock<Vec<Arc<AppFolder>>>> {
-        &self.folders
-    }
-
-    pub fn get_selected_folder_index(&self) -> &Arc<RwLock<Option<usize>>> {
-        &self.selected_folder_index 
-    }
-
-    pub fn get_series(&self) -> &Arc<RwLock<Option<Vec<Series>>>> {
-        &self.series
-    }
-
-    pub fn get_selected_series_index(&self) -> &Arc<RwLock<Option<usize>>> {
-        &self.selected_series_index
-    }
-
-    pub fn get_series_busy_lock(&self) -> &Arc<Mutex<()>> {
-        &self.series_busy_lock
     }
 
     pub async fn update_search_series(&self, search: String) -> Result<(), anyhow::Error> {
@@ -202,5 +182,29 @@ impl App {
             folder.save_cache_to_file(),
         );
         Some(())
+    }
+
+    pub fn get_folders_busy_lock(&self) -> &Arc<Mutex<()>> {
+        &self.folders_busy_lock
+    }
+
+    pub fn get_folders(&self) -> &Arc<RwLock<Vec<Arc<AppFolder>>>> {
+        &self.folders
+    }
+
+    pub fn get_selected_folder_index(&self) -> &Arc<RwLock<Option<usize>>> {
+        &self.selected_folder_index 
+    }
+
+    pub fn get_series(&self) -> &Arc<RwLock<Option<Vec<Series>>>> {
+        &self.series
+    }
+
+    pub fn get_selected_series_index(&self) -> &Arc<RwLock<Option<usize>>> {
+        &self.selected_series_index
+    }
+
+    pub fn get_series_busy_lock(&self) -> &Arc<Mutex<()>> {
+        &self.series_busy_lock
     }
 }

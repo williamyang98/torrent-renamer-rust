@@ -9,6 +9,7 @@ use app::file_intent::Action;
 use tvdb::models::{Series, Episode};
 use std::sync::Arc;
 use std::path::Path;
+use open as cross_open;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum FileTab {
@@ -70,17 +71,29 @@ fn render_errors_list(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
 }
 
 fn render_file_context_menu(
-    _gui: &mut GuiApp, ui: &mut egui::Ui, 
-    files: &mut AppFileMutableContext<'_>, index: usize,
+    gui: &mut GuiApp, ui: &mut egui::Ui, 
+    folder_path: &str, files: &mut AppFileMutableContext<'_>, index: usize,
 ) {
     let current_action = files.get_action(index);
     if ui.button("Open file").clicked() {
-        // TODO:
+        gui.runtime.spawn({
+            let src = files.get_src(index);
+            let file_path = Path::new(folder_path).join(src);
+            let file_path_str = file_path.to_string_lossy().to_string();
+            async move {
+                cross_open::that(file_path_str)
+            }
+        });
         ui.close_menu();
     }
 
     if ui.button("Open folder").clicked() {
-        // TODO:
+        gui.runtime.spawn({
+            let folder_path_str = folder_path.to_string();
+            async move {
+                cross_open::that(folder_path_str)
+            }
+        });
         ui.close_menu();
     }
 
@@ -145,7 +158,7 @@ fn render_files_selectable_list(
                         }
                     }
                     res.context_menu(|ui| {
-                        render_file_context_menu(gui, ui, files, index);
+                        render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
                     });
                 });
             }
@@ -184,7 +197,7 @@ fn render_files_basic_list(
                     }
                 }
                 res.context_menu(|ui| {
-                    render_file_context_menu(gui, ui, files, index);
+                    render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
                 });
             }
         });
@@ -264,7 +277,7 @@ fn render_files_rename_list(
                                     }
                                 }
                                 res.context_menu(|ui| {
-                                    render_file_context_menu(gui, ui, files, index);
+                                    render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
                                 });
                             });
                             row.col(|ui| {
@@ -348,7 +361,7 @@ fn render_files_conflicts_list(
                                             }
                                         }
                                         res.context_menu(|ui| {
-                                            render_file_context_menu(gui, ui, files, index);
+                                            render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
                                         });
                                     });
                                     row.col(|_| {});
@@ -371,7 +384,7 @@ fn render_files_conflicts_list(
                                         let src = files.get_src(index);
                                         let res = ui.selectable_label(false, src); 
                                         res.context_menu(|ui| {
-                                            render_file_context_menu(gui, ui, files, index);
+                                            render_file_context_menu(gui, ui, folder.get_folder_path(), files, index);
                                         });
                                     });
                                     row.col(|ui| {
@@ -442,42 +455,40 @@ fn render_files_tab_bar(gui: &mut GuiApp, ui: &mut egui::Ui, file_tracker: &RwLo
 }
 
 fn render_files_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
-    let file_tracker = match folder.get_file_tracker().try_read() {
-        Ok(guard) => guard,
-        Err(_) => return,
-    };
-    
-    render_files_tab_bar(gui, ui, &file_tracker);
-    ui.separator();
-    
-    let mut files = match folder.get_mut_files_try_blocking() {
-        Some(files) => files,
-        None => {
-            ui.spinner();
+    // Place all our lock guards in this scope so we can flush file changes afterwards
+    {
+        let file_tracker = match folder.get_file_tracker().try_read() {
+            Ok(guard) => guard,
+            Err(_) => return,
+        };
+        
+        render_files_tab_bar(gui, ui, &file_tracker);
+        ui.separator();
+        
+        let mut files = match folder.get_mut_files_try_blocking() {
+            Some(files) => files,
+            None => {
+                ui.spinner();
+                return;
+            },
+        };
+
+        if files.is_empty() {
+            ui.label("Empty folder");
             return;
-        },
-    };
-
-    if files.is_empty() {
-        ui.label("Empty folder");
-        return;
-    }
-
-    match gui.selected_tab {
-        FileTab::FileAction(action) => match action {
-            Action::Rename => render_files_rename_list(gui, ui, folder, &mut files, &file_tracker),
-            Action::Delete => render_files_selectable_list(gui, ui, action, folder, &mut files, &file_tracker),
-            _ => render_files_basic_list(gui, ui, action, folder, &mut files, &file_tracker),
-        },
-        FileTab::Conflicts => render_files_conflicts_list(gui, ui, folder, &mut files, &file_tracker),
-    };
-    
-    gui.runtime.spawn({
-        let folder = folder.clone();
-        async move {
-            folder.flush_file_changes().await
         }
-    });
+
+        match gui.selected_tab {
+            FileTab::FileAction(action) => match action {
+                Action::Rename => render_files_rename_list(gui, ui, folder, &mut files, &file_tracker),
+                Action::Delete => render_files_selectable_list(gui, ui, action, folder, &mut files, &file_tracker),
+                _ => render_files_basic_list(gui, ui, action, folder, &mut files, &file_tracker),
+            },
+            FileTab::Conflicts => render_files_conflicts_list(gui, ui, folder, &mut files, &file_tracker),
+        };
+    }
+    
+    folder.flush_file_changes_blocking();
 }
 
 fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
@@ -681,7 +692,8 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
             for (index, folder) in folders.iter().enumerate() {
                 let label = folder.get_folder_name().to_string();
                 let mut is_selected = selected_index == Some(index);
-                if ui.toggle_value(&mut is_selected, label).clicked() {
+                let res = ui.toggle_value(&mut is_selected, label);
+                if res.clicked() {
                     let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
                     if !is_selected {
                         *selected_index = None;
@@ -689,6 +701,17 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
                         *selected_index = Some(index);
                     }
                 }
+                res.context_menu(|ui| {
+                    if ui.button("Open folder").clicked() {
+                        gui.runtime.spawn({
+                            let folder_path_str = folder.get_folder_path().to_string();
+                            async move {
+                                cross_open::that(folder_path_str)
+                            }
+                        });
+                        ui.close_menu();
+                    }
+                });
             }
         });
     });
@@ -1029,7 +1052,7 @@ fn main() -> Result<(), eframe::Error> {
                     let app = app.clone();
                     async move {
                         tokio::join!(
-                            app.open_folders(root_path.as_str()),
+                            app.load_folders(root_path),
                             app.login(),
                         )
                     }

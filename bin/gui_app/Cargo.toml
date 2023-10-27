@@ -15,4 +15,5 @@ tvdb = { version = "0.1.0", path = "../../crates/tvdb" }
 eframe = { version = "0.23.0", features = ["persistence"] }
 egui = { version = "0.23.0", features = ["persistence"] }
 egui_extras = { version = "0.23.0" }
+open = "5.0.0"
 

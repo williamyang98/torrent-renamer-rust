@@ -567,104 +567,19 @@ impl AppFolder {
     }
 
     pub async fn flush_file_changes(&self) -> usize {
-        let (mut file_table, mut conflict_table, mut change_queue) = tokio::join!(
+        let (file_list, file_tracker, change_queue) = tokio::join!(
             self.file_list.write(),
             self.file_tracker.write(),
             self.change_queue.write(),
         );
+        flush_file_changes_acquired(file_list, file_tracker, change_queue)
+    }
 
-        let mut total_changes: usize = 0;
-        for file_change in change_queue.iter() {
-            match file_change {
-                AppFileChange::SetAction(index, new_action) => {
-                    let index = *index;
-                    let new_action = *new_action;
-                    let file = match file_table.get_mut(index) {
-                        Some(file) => file,
-                        None => continue,
-                    };
-
-                    let old_action = file.action;
-                    file.action = new_action;
-
-                    if old_action == new_action {
-                        continue;
-                    }
-
-                    conflict_table.action_count[old_action] -= 1usize;
-                    conflict_table.action_count[new_action] += 1usize;
-
-                    if !file.is_enabled {
-                        continue;
-                    };
-
-                    if old_action != Action::Rename && new_action != Action::Rename {
-                        continue;
-                    }
-
-                    if old_action == Action::Rename {
-                        conflict_table.remove_pending_write(file.dest.as_str(), index);
-                    } else {
-                        conflict_table.add_pending_write(file.dest.as_str(), index);
-                    };
-                    total_changes += 1;
-                },
-                AppFileChange::IsEnabled(index, new_is_enabled) => {
-                    let index = *index;
-                    let new_is_enabled = *new_is_enabled;
-                    let file = match file_table.get_mut(index) {
-                        Some(file) => file,
-                        None => continue,
-                    };
-
-                    let old_is_enabled = file.is_enabled;
-                    file.is_enabled = new_is_enabled;
-
-                    if old_is_enabled == new_is_enabled {
-                        continue;
-                    }
-
-                    if file.action != Action::Rename {
-                        continue;
-                    }
-
-                    if new_is_enabled {
-                        conflict_table.add_pending_write(file.dest.as_str(), index);
-                    } else {
-                        conflict_table.remove_pending_write(file.dest.as_str(), index);
-                    };
-                    total_changes += 1;
-                },
-                AppFileChange::Destination(index, new_dest) => {
-                    let index = *index;
-                    let file = match file_table.get_mut(index) {
-                        Some(file) => file,
-                        None => continue,
-                    };
-
-                    if file.dest.as_str() == new_dest {
-                        continue
-                    }
-
-                    // We perform a .clear() and .push_str(...) to avoid a short lived clone
-                    if !file.is_enabled || file.action != Action::Rename {
-                        file.dest.clear();
-                        file.dest.push_str(new_dest.as_str());
-                        continue
-                    }
-
-                    conflict_table.remove_pending_write(file.dest.as_str(), index);
-                    conflict_table.add_pending_write(new_dest.as_str(), index);
-
-                    file.dest.clear();
-                    file.dest.push_str(new_dest.as_str());
-                    total_changes += 1;
-                },
-            }
-        }
-
-        change_queue.clear();
-        total_changes
+    pub fn flush_file_changes_blocking(&self) -> usize {
+        let file_list = self.file_list.blocking_write();
+        let file_tracker = self.file_tracker.blocking_write();
+        let change_queue = self.change_queue.blocking_write();
+        flush_file_changes_acquired(file_list, file_tracker, change_queue)
     }
 }
 
@@ -790,4 +705,103 @@ impl AppFileMutableContext<'_> {
         let change = AppFileChange::Destination(index, new_dest);
         self.change_queue.push(change);
     }
+}
+
+fn flush_file_changes_acquired(
+    mut file_list: RwLockWriteGuard<'_, Vec<AppFile>>,  
+    mut file_tracker: RwLockWriteGuard<'_, FileTracker>,
+    mut change_queue: RwLockWriteGuard<'_, Vec<AppFileChange>>,
+) -> usize {
+    let mut total_changes: usize = 0;
+    for file_change in change_queue.iter() {
+        match file_change {
+            AppFileChange::SetAction(index, new_action) => {
+                let index = *index;
+                let new_action = *new_action;
+                let file = match file_list.get_mut(index) {
+                    Some(file) => file,
+                    None => continue,
+                };
+
+                let old_action = file.action;
+                file.action = new_action;
+
+                if old_action == new_action {
+                    continue;
+                }
+
+                file_tracker.action_count[old_action] -= 1usize;
+                file_tracker.action_count[new_action] += 1usize;
+
+                if !file.is_enabled {
+                    continue;
+                };
+
+                if old_action != Action::Rename && new_action != Action::Rename {
+                    continue;
+                }
+
+                if old_action == Action::Rename {
+                    file_tracker.remove_pending_write(file.dest.as_str(), index);
+                } else {
+                    file_tracker.add_pending_write(file.dest.as_str(), index);
+                };
+                total_changes += 1;
+            },
+            AppFileChange::IsEnabled(index, new_is_enabled) => {
+                let index = *index;
+                let new_is_enabled = *new_is_enabled;
+                let file = match file_list.get_mut(index) {
+                    Some(file) => file,
+                    None => continue,
+                };
+
+                let old_is_enabled = file.is_enabled;
+                file.is_enabled = new_is_enabled;
+
+                if old_is_enabled == new_is_enabled {
+                    continue;
+                }
+
+                if file.action != Action::Rename {
+                    continue;
+                }
+
+                if new_is_enabled {
+                    file_tracker.add_pending_write(file.dest.as_str(), index);
+                } else {
+                    file_tracker.remove_pending_write(file.dest.as_str(), index);
+                };
+                total_changes += 1;
+            },
+            AppFileChange::Destination(index, new_dest) => {
+                let index = *index;
+                let file = match file_list.get_mut(index) {
+                    Some(file) => file,
+                    None => continue,
+                };
+
+                if file.dest.as_str() == new_dest {
+                    continue
+                }
+
+                // We perform a .clear() and .push_str(...) to avoid a short lived clone
+                if !file.is_enabled || file.action != Action::Rename {
+                    file.dest.clear();
+                    file.dest.push_str(new_dest.as_str());
+                    continue
+                }
+
+                file_tracker.remove_pending_write(file.dest.as_str(), index);
+                file_tracker.add_pending_write(new_dest.as_str(), index);
+
+                file.dest.clear();
+                file.dest.push_str(new_dest.as_str());
+                total_changes += 1;
+            },
+        }
+    }
+
+    change_queue.clear();
+    total_changes
 }
