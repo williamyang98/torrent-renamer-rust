@@ -1,3 +1,4 @@
+use app::app_folder_cache::EpisodeKey;
 use tokio;
 use egui;
 use egui_extras::{Column, TableBuilder};
@@ -26,7 +27,7 @@ impl FuzzySearcher {
             search_edit_line: "".to_owned(),
             search_edit_line_filtered: "".to_owned(),
             input_edit_line_filtered: "".to_owned(),
-            char_blacklist: vec!['.', '-', ' '],
+            char_blacklist: vec!['.', '-', ' ', ',', '(', ')', '[', ']', ':'],
         }
     }
 
@@ -76,6 +77,7 @@ struct GuiApp {
     episodes_fuzzy_search: FuzzySearcher,
     folders_fuzzy_search: FuzzySearcher,
     folders_filter: enum_map::EnumMap<FolderStatus, bool>,
+    show_episode_cache_search: bool,
 }
 
 impl GuiApp {
@@ -90,7 +92,67 @@ impl GuiApp {
             episodes_fuzzy_search: FuzzySearcher::new(),
             folders_fuzzy_search: FuzzySearcher::new(),
             folders_filter: enum_map::enum_map! { _ => true },
+            show_episode_cache_search: false,
         }
+    }
+}
+
+struct ClippedSelectableLabel {
+    selected: bool,
+    text: egui::WidgetText,
+}
+
+impl ClippedSelectableLabel {
+    pub fn new(selected: bool, text: impl Into<egui::WidgetText>) -> Self {
+        ClippedSelectableLabel {
+            selected,
+            text: text.into(),
+        }
+    }
+}
+
+impl egui::Widget for ClippedSelectableLabel {
+    fn ui(self, ui: &mut egui::Ui) -> egui::Response {
+        let button_padding = ui.spacing().button_padding;
+        let total_extra = button_padding + button_padding;
+        
+        // Taken from egui::Label
+        let valign = ui.layout().vertical_align();
+        let max_text_width = ui.available_width() - total_extra.x;
+        let mut text_job = self.text.into_text_job(ui.style(), egui::FontSelection::Default, valign);
+        text_job.job.wrap.max_width = max_text_width; 
+        text_job.job.wrap.max_rows = 1;
+        text_job.job.wrap.break_anywhere = true;
+        text_job.job.wrap.overflow_character = None;
+        let text_galley = ui.fonts(|f| text_job.into_galley(f));
+        
+        // Rest is from egui::SelectableLabel
+        let mut desired_size = total_extra + text_galley.size();
+        desired_size.y = desired_size.y.max(ui.spacing().interact_size.y);
+        let (rect, response) = ui.allocate_at_least(desired_size, egui::Sense::click());
+        response.widget_info(|| {
+            egui::WidgetInfo::selected(egui::WidgetType::SelectableLabel, self.selected, text_galley.text())
+        });
+
+        if ui.is_rect_visible(response.rect) {
+            let text_pos = ui
+                .layout()
+                .align_size_within_rect(text_galley.size(), rect.shrink2(button_padding))
+                .min;
+
+            let visuals = ui.style().interact_selectable(&response, self.selected);
+            if self.selected || response.hovered() || response.highlighted() || response.has_focus() {
+                let rect = rect.expand(visuals.expansion);
+                ui.painter().rect(
+                    rect,
+                    visuals.rounding,
+                    visuals.weak_bg_fill,
+                    visuals.bg_stroke,
+                );
+            }
+            text_galley.paint_with_visuals(ui.painter(), text_pos, &visuals);
+        }
+        response
     }
 }
 
@@ -105,13 +167,23 @@ lazy_static! {
 }
 
 fn render_search_bar(ui: &mut egui::Ui, search_bar: &mut FuzzySearcher) {
-    ui.horizontal(|ui| {
-        let res = ui.text_edit_singleline(&mut search_bar.search_edit_line);
-        if res.changed() {
-            search_bar.update_search_filtered();
-        }
+    let layout = egui::Layout::right_to_left(egui::Align::Min)
+        .with_cross_justify(false)
+        .with_main_justify(false)
+        .with_main_wrap(false)
+        .with_main_align(egui::Align::LEFT);
+    ui.with_layout(layout, |ui| {
         if ui.button("Clear").clicked() {
             search_bar.search_edit_line.clear();
+            search_bar.update_search_filtered();
+        }
+        let elem = egui::TextEdit::singleline(&mut search_bar.search_edit_line);
+        let size = egui::vec2(
+            ui.available_width(),
+            ui.spacing().interact_size.y,
+        );
+        let res = ui.add_sized(size, elem);
+        if res.changed() {
             search_bar.update_search_filtered();
         }
     });
@@ -296,27 +368,35 @@ fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_ac
                     if is_deselect_all {
                         files.set_is_enabled(false, index);
                     }
+                    
+                    {
+                        let src = files.get_src(index);
+                        let bookmark = bookmarks.get_mut_with_insert(src);
+                        is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
+                    }
 
-                    let src = files.get_src(index);
-                    let bookmark = bookmarks.get_mut_with_insert(src);
-                    is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
-
-                    let descriptor = files.get_src_descriptor(index);
-                    let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                    let res = ui.selectable_label(is_selected, src);
-                    if res.clicked() {
-                        if is_selected {
-                            *folder.get_selected_descriptor().blocking_write() = None;
-                        } else {
-                            *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                    ui.with_layout(layout, |ui| {
+                        let src = files.get_src(index);
+                        let descriptor = files.get_src_descriptor(index);
+                        let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                        let elem = ClippedSelectableLabel::new(is_selected, src);
+                        let res = ui.add(elem);
+                        if res.clicked() {
+                            if is_selected {
+                                *folder.get_selected_descriptor().blocking_write() = None;
+                            } else {
+                                *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                            }
                         }
-                    }
-                    if res.hovered() {
-                        check_file_shortcuts(ui, &mut files, index);
-                    }
-                    res.context_menu(|ui| {
-                        render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                        if res.hovered() {
+                            check_file_shortcuts(ui, &mut files, index);
+                        }
+                        res.context_menu(|ui| {
+                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                        });
                     });
+
                 });
             }
         });
@@ -360,25 +440,31 @@ fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action:
                 }
                 
                 ui.horizontal(|ui| {
-                    let src = files.get_src(index);
-                    let bookmark = bookmarks.get_mut_with_insert(src);
-                    is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
-
-                    let descriptor = files.get_src_descriptor(index);
-                    let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                    let res = ui.selectable_label(is_selected, src);
-                    if res.clicked() {
-                        if is_selected {
-                            *folder.get_selected_descriptor().blocking_write() = None;
-                        } else {
-                            *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                    {
+                        let src = files.get_src(index);
+                        let bookmark = bookmarks.get_mut_with_insert(src);
+                        is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
+                    }
+                    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                    ui.with_layout(layout, |ui| {
+                        let src = files.get_src(index);
+                        let descriptor = files.get_src_descriptor(index);
+                        let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                        let elem = ClippedSelectableLabel::new(is_selected, src);
+                        let res = ui.add(elem);
+                        if res.clicked() {
+                            if is_selected {
+                                *folder.get_selected_descriptor().blocking_write() = None;
+                            } else {
+                                *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                            }
                         }
-                    }
-                    if res.hovered() {
-                        check_file_shortcuts(ui, &mut files, index);
-                    }
-                    res.context_menu(|ui| {
-                        render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                        if res.hovered() {
+                            check_file_shortcuts(ui, &mut files, index);
+                        }
+                        res.context_menu(|ui| {
+                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                        });
                     });
                 });
             }
@@ -415,16 +501,16 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
     render_search_bar(ui, &mut gui.episodes_fuzzy_search);
     
     egui::ScrollArea::vertical().show(ui, |ui| {
-        let layout = egui::Layout::top_down(egui::Align::Center).with_cross_justify(true);
+        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
             let row_height = 18.0;
             TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::LEFT))
-                .column(Column::auto().resizable(false))
-                .column(Column::auto().clip(true))
-                .column(Column::remainder().clip(true).resizable(false))
+                .cell_layout(layout)
+                .column(Column::auto_with_initial_suggestion(0.0).resizable(false).clip(true))
+                .column(Column::auto().resizable(true).clip(true))
+                .column(Column::remainder().resizable(false).clip(true))
                 .header(row_height, |mut header| {
                     header.col(|_| {});
                     header.col(|ui| { ui.strong("Source"); });
@@ -460,11 +546,12 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
                                 let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
                                 let is_conflict = files.get_is_conflict(index);
                                 let src = files.get_src(index);
-                                let res = if is_conflict {
-                                    ui.selectable_label(is_selected, egui::RichText::new(src).color(egui::Color32::DARK_RED))
-                                } else {
-                                    ui.selectable_label(is_selected, src)
-                                };
+                                let mut label = egui::RichText::new(src);
+                                if is_conflict {
+                                    label = label.color(egui::Color32::DARK_RED)
+                                }
+                                let elem = ClippedSelectableLabel::new(is_selected, label);
+                                let res = ui.add(elem);
                                 if res.clicked() {
                                     if is_selected {
                                         *folder.get_selected_descriptor().blocking_write() = None;
@@ -481,7 +568,9 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
                             });
                             row.col(|ui| {
                                 let mut dest_edit_buffer = files.get_dest(index).to_string();
-                                if ui.text_edit_singleline(&mut dest_edit_buffer).changed() {
+                                let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
+                                let res = ui.add_sized(ui.available_size(), elem);
+                                if res.changed() {
                                     files.set_dest(dest_edit_buffer, index);
                                 }
                             });
@@ -505,6 +594,7 @@ fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
             // keep track of when to add separators
             let mut is_first = true;
             let mut total_conflicts = 0;
+            let mut column_width = None;
             for (row_id, (dest, indices)) in file_tracker.get_pending_writes().iter().enumerate() {
                 let mut total_files = indices.len();
                 if total_files == 0 {
@@ -529,79 +619,90 @@ fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
                     ui.heading(dest);
 
                     let row_height = 18.0;
-                    TableBuilder::new(ui)
-                        .striped(true)
-                        .resizable(true)
-                        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-                        .column(Column::auto().resizable(false))
-                        .column(Column::auto().clip(true))
-                        .column(Column::remainder().resizable(false).clip(true))
-                        .header(row_height, |mut header| {
-                            header.col(|_| {});
-                            header.col(|ui| { ui.strong("Source"); });
-                            header.col(|ui| { ui.strong("Destination"); });
-                        })
-                        .body(|mut body| {
-                            if let Some(index) = source_index {
-                                let index = *index;
-                                body.row(row_height, |mut row| {
-                                    row.col(|_| {});
-                                    row.col(|ui| { 
-                                        let descriptor = files.get_src_descriptor(index);
-                                        let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                                        let src = files.get_src(index);
-                                        let res = ui.selectable_label(false, src); 
-                                        if res.clicked() {
-                                            if is_selected {
-                                                *folder.get_selected_descriptor().blocking_write() = None;
-                                            } else {
-                                                *folder.get_selected_descriptor().blocking_write() = *descriptor;
-                                            }
-                                        }
-                                        if res.hovered() {
-                                            check_file_shortcuts(ui, &mut files, index);
-                                        }
-                                        res.context_menu(|ui| {
-                                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
-                                        });
-                                    });
-                                    row.col(|_| {});
-                                });
-                            }
+                    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                    ui.with_layout(layout, |ui| {
+                        let mut table = TableBuilder::new(ui)
+                            .striped(true)
+                            .resizable(true)
+                            .cell_layout(layout)
+                            .column(Column::auto_with_initial_suggestion(0.0).resizable(false).clip(true));
 
-                            for index in indices {
-                                let index = *index;
-                                let action = files.get_action(index); 
-                                body.row(row_height, |mut row| {
-                                    row.col(|ui| {
-                                        if action == Action::Rename || action == Action::Delete {
-                                            let mut is_enabled = files.get_is_enabled(index);
-                                            if ui.checkbox(&mut is_enabled, "").clicked() {
-                                                files.set_is_enabled(is_enabled, index);
+                        table = if let Some(width) = column_width {
+                            table
+                                .column(Column::exact(width).resizable(true).clip(true))
+                                .column(Column::remainder().resizable(false).clip(true))
+                        } else {
+                            table
+                                .column(Column::remainder().resizable(true).clip(true))
+                                .column(Column::remainder().resizable(false).clip(true))
+                        };
+
+                        table
+                            .header(row_height, |mut header| {
+                                header.col(|_| {});
+                                header.col(|ui| { ui.strong("Source"); });
+                                header.col(|ui| { ui.strong("Destination"); });
+                            })
+                            .body(|mut body| {
+                                let mut render_entry = |index: usize| {
+                                    let action = files.get_action(index); 
+                                    body.row(row_height, |mut row| {
+                                        row.col(|ui| {
+                                            if action == Action::Rename || action == Action::Delete {
+                                                let mut is_enabled = files.get_is_enabled(index);
+                                                if ui.checkbox(&mut is_enabled, "").clicked() {
+                                                    files.set_is_enabled(is_enabled, index);
+                                                }
                                             }
-                                        }
-                                    });
-                                    row.col(|ui| {
-                                        let src = files.get_src(index);
-                                        let res = ui.selectable_label(false, src); 
-                                        if res.hovered() {
-                                            check_file_shortcuts(ui, &mut files, index);
-                                        }
-                                        res.context_menu(|ui| {
-                                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                                        });
+                                        row.col(|ui| {
+                                            // Link the table width across all entries
+                                            if column_width.is_none() {
+                                                column_width = Some(ui.available_width());
+                                            }
+                                            let descriptor = files.get_src_descriptor(index);
+                                            let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                                            let src = files.get_src(index);
+                                            let elem = ClippedSelectableLabel::new(is_selected, src);
+                                            let res = ui.add(elem);
+                                            if res.clicked() {
+                                                if is_selected {
+                                                    *folder.get_selected_descriptor().blocking_write() = None;
+                                                } else {
+                                                    *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                                                }
+                                            }
+                                            if res.hovered() {
+                                                check_file_shortcuts(ui, &mut files, index);
+                                            }
+                                            res.context_menu(|ui| {
+                                                render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                                            });
+                                        });
+                                        row.col(|ui| {
+                                            if action == Action::Rename {
+                                                let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                                let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
+                                                let res = ui.add_sized(ui.available_size(), elem);
+                                                if res.changed() {
+                                                    files.set_dest(dest_edit_buffer, index);
+                                                }
+                                            }
                                         });
                                     });
-                                    row.col(|ui| {
-                                        if action == Action::Rename {
-                                            let mut dest_edit_buffer = files.get_dest(index).to_string();
-                                            if ui.text_edit_singleline(&mut dest_edit_buffer).changed() {
-                                                files.set_dest(dest_edit_buffer, index);
-                                            }
-                                        }
-                                    });
-                                });
-                            }
-                        });
+                                };
+
+                                if let Some(index) = source_index {
+                                    let index = *index;
+                                    render_entry(index);
+                                }
+
+                                for index in indices {
+                                    let index = *index;
+                                    render_entry(index);
+                                }
+                            });
+                    });
                 });
             }
 
@@ -715,10 +816,15 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
         };
         
         ui.toggle_value(&mut gui.show_series_search, "Search series");
+        ui.add_enabled_ui(folder.is_cache_loaded(), |ui| {
+            ui.toggle_value(&mut gui.show_episode_cache_search, "Search episodes");
+        });
     });
 }
 
 fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    render_invisible_width_widget(ui);
+
     let cache = folder.get_cache().blocking_read();
     let cache = match cache.as_ref() {
         Some(cache) => cache,
@@ -822,52 +928,57 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
 
     egui::CentralPanel::default()
         .show_inside(ui, |ui| {
-            ui.push_id("folder_files_list", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_enabled_ui(is_not_busy, |ui| {
-                        render_files_list(gui, ui, &folder);
+            if !gui.show_episode_cache_search {
+                ui.push_id("folder_files_list", |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.add_enabled_ui(is_not_busy, |ui| {
+                            render_files_list(gui, ui, &folder);
+                        });
                     });
                 });
-            });
+            } else {
+                ui.push_id("folder_episode_cache_search", |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        render_episode_cache_search(gui, ui, &folder);
+                    });
+                });
+            }
         });
 }
 
-fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus) {
-    match status {
-        FolderStatus::Unknown => {
-            ui.label("U");
-        },
-        FolderStatus::Empty => {
-            ui.label("E");
-        },
-        FolderStatus::Pending => {
-            ui.label("P");
-        },
-        FolderStatus::Done => {
-            let label = egui::RichText::new("✔").strong().color(egui::Color32::DARK_GREEN);
-            ui.add(egui::Label::new(label));
-        },
+lazy_static! {
+    static ref FOLDER_STATUS_ICONS: enum_map::EnumMap<FolderStatus, egui::RichText> = enum_map::enum_map! {
+        FolderStatus::Unknown => egui::RichText::new("？").strong().color(egui::Color32::DARK_RED),
+        FolderStatus::Empty => egui::RichText::new("O").strong().color(egui::Color32::GRAY),
+        FolderStatus::Pending => egui::RichText::new("↺").strong().color(egui::Color32::DARK_BLUE),
+        FolderStatus::Done => egui::RichText::new("✔").strong().color(egui::Color32::DARK_GREEN),
     };
 }
 
-fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
+fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus) {
+    let size = egui::vec2(
+        20.0,
+        ui.spacing().interact_size.y,
+    );
+    let height = ui.text_style_height(&egui::TextStyle::Monospace);
+    let icon = FOLDER_STATUS_ICONS[status].clone().size(height);
+    ui.add_sized(size, egui::Label::new(icon));
+}
+
+fn render_invisible_width_widget(ui: &mut egui::Ui) {
+    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+    ui.with_layout(layout, |ui| {
+        ui.add_visible_ui(false, |ui| {
+            ui.separator();
+        });
+    });
+}
+
+fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
+    render_invisible_width_widget(ui);
+
     let folders = gui.app.get_folders().blocking_read();
-    ui.heading(format!("Folders ({})", folders.len()));
-
-
     let is_busy = gui.app.get_folders_busy_lock().try_lock().is_err();
-    if folders.is_empty() {
-        if is_busy {
-            ui.spinner();
-        } else {
-            ui.label("No folders");
-        }
-        return;
-    }
-
-    render_search_bar(ui, &mut gui.folders_fuzzy_search);
-
-
     let total_folders = folders.len();
     let mut status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
     let mut total_busy_folders = 0;
@@ -878,13 +989,7 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
             total_busy_folders += 1;
         }
     }
-    for status in FolderStatus::iterator() {
-        let status = *status;
-        let flag = &mut gui.folders_filter[status];
-        ui.checkbox(flag, format!("{} ({})", status.to_str(), status_counts[status]));
-    }
-    ui.label(format!("Busy ({}/{})", total_busy_folders, total_folders));
-    
+
     ui.add_enabled_ui(!is_busy, |ui| {
         ui.horizontal(|ui| {
             if ui.button("Refresh all").clicked() {
@@ -905,7 +1010,50 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
             }
         });
     });
-    
+
+    if folders.is_empty() {
+        if is_busy {
+            ui.spinner();
+        } else {
+            ui.label("No folders");
+        }
+        return;
+    }
+
+    {
+        let total_finished = total_folders - total_busy_folders;
+        let progress: f32 = total_finished as f32 / total_folders as f32;
+        let elem = egui::ProgressBar::new(progress)
+            .text(format!("{}/{}", total_finished, total_folders))
+            .desired_width(ui.available_width())
+            .desired_height(ui.spacing().interact_size.y);
+        ui.add(elem);
+    }
+
+    ui.separator();
+
+    let layout = egui::Layout::left_to_right(egui::Align::Min)
+        .with_main_justify(true)
+        .with_main_wrap(true);
+    ui.with_layout(layout, |ui| {
+        let total_columns = 2;
+        egui::Grid::new("status_filter_flags")
+            .num_columns(total_columns)
+            .striped(true)
+            .show(ui, |ui| {
+                for (index, status) in FolderStatus::iterator().enumerate() {
+                    let status = *status;
+                    let flag = &mut gui.folders_filter[status];
+                    let checkbox = egui::Checkbox::new(flag, format!("{} ({})", status.to_str(), status_counts[status]));
+                    ui.add(checkbox);
+                    if (index + 1) % total_columns == 0 {
+                        ui.end_row();
+                    }
+                }
+            });
+    });
+
+    render_search_bar(ui, &mut gui.folders_fuzzy_search);
     
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
@@ -924,27 +1072,30 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
 
                 ui.horizontal(|ui| {
                     render_folder_status(ui, status);
-
-                    let mut is_selected = selected_index == Some(index);
-                    let res = ui.toggle_value(&mut is_selected, label);
-                    if res.clicked() {
-                        let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
-                        if !is_selected {
-                            *selected_index = None;
-                        } else {
-                            *selected_index = Some(index);
+                    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                    ui.with_layout(layout, |ui| {
+                        let is_selected = selected_index == Some(index);
+                        let elem = ClippedSelectableLabel::new(is_selected, folder.get_folder_name());
+                        let res = ui.add(elem);
+                        if res.clicked() {
+                            let mut selected_index = gui.app.get_selected_folder_index().blocking_write();
+                            if !is_selected {
+                                *selected_index = Some(index);
+                            } else {
+                                *selected_index = None;
+                            }
                         }
-                    }
-                    res.context_menu(|ui| {
-                        if ui.button("Open folder").clicked() {
-                            gui.runtime.spawn({
-                                let folder_path_str = folder.get_folder_path().to_string();
-                                async move {
-                                    cross_open::that(folder_path_str)
-                                }
-                            });
-                            ui.close_menu();
-                        }
+                        res.context_menu(|ui| {
+                            if ui.button("Open folder").clicked() {
+                                gui.runtime.spawn({
+                                    let folder_path_str = folder.get_folder_path().to_string();
+                                    async move {
+                                        cross_open::that(folder_path_str)
+                                    }
+                                });
+                                ui.close_menu();
+                            }
+                        });
                     });
                 });
             }
@@ -952,7 +1103,7 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
     });
 }
 
-fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::Context) {
+fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui) {
     if gui.app.get_series_busy_lock().try_lock().is_err() {
         ui.spinner();
         return;
@@ -974,136 +1125,159 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui, _ctx: &egui::C
 
     render_search_bar(ui, &mut gui.series_fuzzy_search);
 
-    let row_height = 18.0;
-    TableBuilder::new(ui)
-        .striped(true)
-        .resizable(true)
-        .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
-        .column(Column::auto().clip(true))
-        .column(Column::auto().resizable(false))
-        .column(Column::auto().resizable(false))
-        .column(Column::auto().resizable(false))
-        .header(row_height, |mut header| {
-            header.col(|ui| { ui.strong("Name"); });
-            header.col(|ui| { ui.strong("Status"); });
-            header.col(|ui| { ui.strong("First Aired"); });
-            header.col(|ui| { ui.strong(""); });
-        })
-        .body(|mut body| {
-            let selected_index = *gui.app.get_selected_series_index().blocking_read();
-            for (index, entry) in series.iter().enumerate() {
-                if !gui.series_fuzzy_search.search(entry.name.as_str()) {
-                    continue;
-                }
-
-                body.row(row_height, |mut row| {
-                    row.col(|ui| { 
-                        let is_selected = Some(index) == selected_index;
-                        if ui.selectable_label(is_selected, entry.name.as_str()).clicked() {
-                            if is_selected {
-                                *gui.app.get_selected_series_index().blocking_write() = None;
-                            } else {
-                                *gui.app.get_selected_series_index().blocking_write() = Some(index);
-                            }
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+        ui.with_layout(layout, |ui| {
+            let row_height = 18.0;
+            TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_justify(false))
+                .column(Column::remainder().resizable(true).clip(true))
+                .column(Column::auto().resizable(false))
+                .column(Column::auto().resizable(false))
+                .column(Column::auto().resizable(false))
+                .header(row_height, |mut header| {
+                    header.col(|ui| { ui.strong("Name"); });
+                    header.col(|ui| { ui.strong("Status"); });
+                    header.col(|ui| { ui.strong("First Aired"); });
+                    header.col(|ui| { ui.strong(""); });
+                })
+                .body(|mut body| {
+                    let selected_index = *gui.app.get_selected_series_index().blocking_read();
+                    for (index, entry) in series.iter().enumerate() {
+                        if !gui.series_fuzzy_search.search(entry.name.as_str()) {
+                            continue;
                         }
-                    });
-                    row.col(|ui| {
-                        let label = entry.status.as_deref().unwrap_or("Unknown");
-                        ui.label(label);
-                    });
-                    row.col(|ui| {
-                        let label = entry.first_aired.as_deref().unwrap_or("Unknown");
-                        ui.label(label);
-                    });
-                    row.col(|ui| {
-                        if ui.button("Select").clicked() {
-                            gui.runtime.spawn({
-                                let entry_id = entry.id;
-                                let app = gui.app.clone();
-                                async move {
-                                    app.set_series_to_current_folder(entry_id).await
+
+                        body.row(row_height, |mut row| {
+                            row.col(|ui| { 
+                                let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                                ui.with_layout(layout, |ui| {
+                                    let is_selected = Some(index) == selected_index;
+                                    let elem = ClippedSelectableLabel::new(is_selected, entry.name.as_str());
+                                    let res = ui.add(elem);
+                                    if res.clicked() {
+                                        if is_selected {
+                                            *gui.app.get_selected_series_index().blocking_write() = None;
+                                        } else {
+                                            *gui.app.get_selected_series_index().blocking_write() = Some(index);
+                                        }
+                                    }
+                                });
+                            });
+                            row.col(|ui| {
+                                let label = entry.status.as_deref().unwrap_or("Unknown");
+                                ui.label(label);
+                            });
+                            row.col(|ui| {
+                                let label = entry.first_aired.as_deref().unwrap_or("Unknown");
+                                ui.label(label);
+                            });
+                            row.col(|ui| {
+                                if ui.button("Select").clicked() {
+                                    gui.runtime.spawn({
+                                        let entry_id = entry.id;
+                                        let app = gui.app.clone();
+                                        async move {
+                                            app.set_series_to_current_folder(entry_id).await
+                                        }
+                                    });
                                 }
                             });
-                        }
-                    });
-                });
+                        });
 
-            }
+                    }
+                });
         });
+    });
+
 }
 
 fn render_series_table(ui: &mut egui::Ui, series: &Series) {
-    egui::Grid::new("series_table")
-        .num_columns(2)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.strong("ID");
-            ui.label(format!("{}", series.id));
-            ui.end_row();
+    let layout = egui::Layout::left_to_right(egui::Align::Min)
+        .with_main_justify(true)
+        .with_main_wrap(true);
+    ui.with_layout(layout, |ui| {
+        egui::Grid::new("series_table")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("ID");
+                ui.label(format!("{}", series.id));
+                ui.end_row();
 
-            ui.strong("Name");
-            let gui_label = egui::Label::new(series.name.as_str()).wrap(true);
-            ui.add(gui_label);
-            ui.end_row();
+                ui.strong("Name");
+                let gui_label = egui::Label::new(series.name.as_str()).wrap(true);
+                ui.add(gui_label);
+                ui.end_row();
 
-            ui.strong("Status");
-            let label = series.status.as_deref().unwrap_or("Unknown");
-            ui.label(label);
-            ui.end_row();
+                ui.strong("Status");
+                let label = series.status.as_deref().unwrap_or("Unknown");
+                ui.label(label);
+                ui.end_row();
 
-            ui.strong("Air date");
-            let label = series.first_aired.as_deref().unwrap_or("Unknown");
-            ui.label(label);
-            ui.end_row();
+                ui.strong("Air date");
+                let label = series.first_aired.as_deref().unwrap_or("Unknown");
+                ui.label(label);
+                ui.end_row();
 
-            ui.strong("Genre");
-            let label = match &series.genre {
-                None => "Unknown".to_string(),
-                Some(genres) => genres.join(","),
-            };
-            let gui_label = egui::Label::new(label).wrap(true);
-            ui.add(gui_label);
-            ui.end_row();
+                ui.strong("Genre");
+                let label = match &series.genre {
+                    None => "Unknown".to_string(),
+                    Some(genres) => genres.join(","),
+                };
+                let gui_label = egui::Label::new(label).wrap(true);
+                ui.add(gui_label);
+                ui.end_row();
 
-            ui.strong("Overview");
-            let label = series.overview.as_deref().unwrap_or("Unknown");
-            let gui_label = egui::Label::new(label).wrap(true);
-            ui.add(gui_label);
-            ui.end_row();
-        });
+                ui.strong("Overview");
+                let label = series.overview.as_deref().unwrap_or("Unknown");
+                let gui_label = egui::Label::new(label).wrap(true);
+                ui.add(gui_label);
+                ui.end_row();
+            });
+    });
 }
 
 fn render_episode_table(ui: &mut egui::Ui, episode: &Episode) {
-    egui::Grid::new("episode_table")
-        .num_columns(2)
-        .striped(true)
-        .show(ui, |ui| {
-            ui.strong("ID");
-            ui.label(format!("{}", episode.id));
-            ui.end_row();
+    let layout = egui::Layout::left_to_right(egui::Align::Min)
+        .with_main_justify(true)
+        .with_main_wrap(true);
+    ui.with_layout(layout, |ui| {
+        egui::Grid::new("episode_table")
+            .num_columns(2)
+            .striped(true)
+            .show(ui, |ui| {
+                ui.strong("ID");
+                ui.label(format!("{}", episode.id));
+                ui.end_row();
 
-            ui.strong("Index");
-            ui.label(format!("S{:02}E{:02}", episode.season, episode.episode));
-            ui.end_row();
+                ui.strong("Index");
+                ui.label(format!("S{:02}E{:02}", episode.season, episode.episode));
+                ui.end_row();
 
-            ui.strong("Name");
-            ui.label(episode.name.as_deref().unwrap_or("None"));
-            ui.end_row();
+                ui.strong("Name");
+                ui.label(episode.name.as_deref().unwrap_or("None"));
+                ui.end_row();
 
-            ui.strong("Air date"); 
-            let label = episode.first_aired.as_deref().unwrap_or("Unknown");
-            ui.label(label);
-            ui.end_row();
+                ui.strong("Air date"); 
+                let label = episode.first_aired.as_deref().unwrap_or("Unknown");
+                ui.label(label);
+                ui.end_row();
 
-            ui.strong("Overview");
-            let label = episode.overview.as_deref().unwrap_or("Unknown");
-            let gui_label = egui::Label::new(label).wrap(true);
-            ui.add(gui_label);
-            ui.end_row();
-        });
+                ui.strong("Overview");
+                let label = episode.overview.as_deref().unwrap_or("Unknown");
+                let gui_label = egui::Label::new(label).wrap(true);
+                ui.add(gui_label);
+                ui.end_row();
+            });
+    });
 }
 
 fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
+    render_invisible_width_widget(ui);
+
     let series_opt = match gui.app.get_series().try_read() {
         Ok(series) => series,
         Err(_) => {
@@ -1140,59 +1314,136 @@ fn render_series_search_info_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
     render_series_table(ui, series);
 }
 
-fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    egui::TopBottomPanel::top("search_bar")
-        .resizable(true)
-        .show_inside(ui, |ui| {
-            let is_not_busy = gui.app.get_series_busy_lock().try_lock().is_ok();
-            ui.add_enabled_ui(is_not_busy, |ui| {
-                ui.horizontal(|ui| {
-                    let res = ui.text_edit_singleline(&mut gui.series_api_search);
-                    let is_pressed = ui.button("Search").clicked();
-                    let is_entered = res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                    if is_pressed || is_entered {
-                        gui.runtime.spawn({
-                            let series_search = gui.series_api_search.clone();
-                            let app = gui.app.clone();
-                            async move {
-                                app.update_search_series(series_search).await
-                            }
-                        });
+fn render_series_search_bar(gui: &mut GuiApp, ui: &mut egui::Ui) {
+    let is_not_busy = gui.app.get_series_busy_lock().try_lock().is_ok();
+    ui.add_enabled_ui(is_not_busy, |ui| {
+        let layout = egui::Layout::right_to_left(egui::Align::Min)
+            .with_cross_justify(false)
+            .with_main_justify(false)
+            .with_main_wrap(false)
+            .with_main_align(egui::Align::LEFT);
+        ui.with_layout(layout, |ui| {
+            let is_pressed = ui.button("Search").clicked();
+
+            let elem = egui::TextEdit::singleline(&mut gui.series_api_search);
+            let size = egui::vec2(
+                ui.available_width(),
+                ui.spacing().interact_size.y,
+            );
+            let line_res = ui.add_sized(size, elem);
+
+            let is_entered = line_res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if is_pressed || is_entered {
+                gui.runtime.spawn({
+                    let series_search = gui.series_api_search.clone();
+                    let app = gui.app.clone();
+                    async move {
+                        app.update_search_series(series_search).await
                     }
                 });
-            });
+            }
         });
+    });
+}
 
+fn render_series_search(gui: &mut GuiApp, ui: &mut egui::Ui) {
     egui::SidePanel::right("search_series_info")
         .resizable(true)
-        .default_width(120.0)
-        .min_width(80.0)
         .show_inside(ui, |ui| {
-            ui.push_id("series_search_info_table", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    render_series_search_info_panel(gui, ui); 
-                });
-            });
+            render_series_search_info_panel(gui, ui); 
         });
 
     egui::CentralPanel::default()
         .show_inside(ui, |ui| {
-            ui.push_id("series_search_list", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    render_series_search_list(gui, ui, ctx);
-                });
-            });
+            render_series_search_bar(gui, ui);
+            ui.separator();
+            render_series_search_list(gui, ui);
         });
+}
+
+fn render_episode_cache_search(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let cache = folder.get_cache().blocking_read();
+    let cache = match cache.as_ref() {
+        Some(cache) => cache,
+        None => {
+            ui.label("No cache loaded");
+            return;
+        },
+    };
+
+    let episodes = &cache.episodes;
+    if episodes.is_empty() {
+        ui.label("No episodes available");
+        return;
+    }
+
+    render_search_bar(ui, &mut gui.episodes_fuzzy_search);
+    
+    let mut episode_name = String::new();
+    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+        ui.with_layout(layout, |ui| {
+            let row_height = 18.0;
+            TableBuilder::new(ui)
+                .striped(true)
+                .resizable(true)
+                .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_justify(false))
+                .column(Column::remainder().resizable(true).clip(true))
+                .column(Column::auto().resizable(false))
+                .column(Column::auto().resizable(false))
+                .column(Column::auto().resizable(false))
+                .header(row_height, |mut header| {
+                    header.col(|ui| { ui.strong("Name"); });
+                    header.col(|ui| { ui.strong("First Aired"); });
+                })
+                .body(|mut body| {
+                    for entry in episodes {
+                        use std::fmt::Write;
+                        episode_name.clear();
+                        let _ = write!(episode_name, "S{:02}E{:02}", entry.season, entry.episode);
+                        if let Some(name) = entry.name.as_deref() {
+                            let _ = write!(episode_name, " {}", name);
+                        }
+                        if !gui.episodes_fuzzy_search.search(episode_name.as_str()) {
+                            continue;
+                        }
+
+                        body.row(row_height, |mut row| {
+                            row.col(|ui| { 
+                                let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                                ui.with_layout(layout, |ui| {
+                                    let descriptor = EpisodeKey { season: entry.season, episode: entry.episode };
+                                    let is_selected = Some(descriptor) == selected_descriptor;
+                                    let elem = ClippedSelectableLabel::new(is_selected, episode_name.as_str());
+                                    let res = ui.add(elem);
+                                    if res.clicked() {
+                                        if is_selected {
+                                            *folder.get_selected_descriptor().blocking_write() = None;
+                                        } else {
+                                            *folder.get_selected_descriptor().blocking_write() = Some(descriptor);
+                                        }
+                                    }
+                                });
+                            });
+                            row.col(|ui| {
+                                let label = entry.first_aired.as_deref().unwrap_or("Unknown");
+                                ui.label(label);
+                            });
+                        });
+
+                    }
+                });
+        });
+    });
 }
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::SidePanel::left("Folders")
             .resizable(true)
-            .default_width(350.0)
-            .min_width(100.0)
             .show(ctx, |ui| {
-                render_folders_list_panel(self, ui, ctx);
+                render_folders_list_panel(self, ui);
             });
 
         egui::CentralPanel::default()
@@ -1206,7 +1457,7 @@ impl eframe::App for GuiApp {
             .vscroll(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
-                render_series_search(self, ui, ctx);
+                render_series_search(self, ui);
             });
         self.show_series_search = is_open;
     }

@@ -369,7 +369,7 @@ impl AppFolder {
             }
         }
 
-        new_file_list.sort_by(|a,b| {
+        new_file_list.sort_unstable_by(|a,b| {
             let a_name = a.src.as_str();
             let b_name = b.src.as_str();
             a_name.partial_cmp(b_name).unwrap_or(std::cmp::Ordering::Equal)
@@ -404,8 +404,8 @@ impl AppFolder {
         Some(())
     }
 
-    pub async fn is_cache_loaded(&self) -> bool {
-        self.cache.read().await.is_some()
+    pub fn is_cache_loaded(&self) -> bool {
+        self.cache.blocking_read().is_some()
     }
 
     pub async fn load_cache_from_file(&self) -> Option<()> {

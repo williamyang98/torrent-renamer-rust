@@ -110,6 +110,8 @@ impl App {
 
     pub async fn load_folders(&self, root_path: String) -> Option<()> {
         let _busy_lock = self.folders_busy_lock.lock().await;
+        // NOTE: If for some reason the folder load failed we can still reattempt 
+        *self.root_path.write().await = root_path.clone();
 
         let mut new_folders = Vec::new();
         let entries = tokio::fs::read_dir(root_path.as_str()).await; 
@@ -166,12 +168,10 @@ impl App {
             a_name.partial_cmp(b_name).unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let (mut root_path_guard, mut folders, mut selected_folder_index) = tokio::join!(
-            self.root_path.write(),
+        let (mut folders, mut selected_folder_index) = tokio::join!(
             self.folders.write(),
             self.selected_folder_index.write(),
         );
-        *root_path_guard = root_path;
         *folders = new_folders;
         *selected_folder_index = None;
         Some(())
