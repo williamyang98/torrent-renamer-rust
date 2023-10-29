@@ -233,7 +233,7 @@ fn check_file_shortcuts(ui: &mut egui::Ui, files: &mut AppFileMutableContext<'_>
 
 fn render_file_context_menu(
     gui: &mut GuiApp, ui: &mut egui::Ui, 
-    folder_path: &str, files: &mut AppFileMutableContext<'_>, index: usize,
+    folder_path: &str, files: &mut AppFileMutableContext<'_>, index: usize, is_not_busy: bool,
 ) {
     let current_action = files.get_action(index);
     if ui.button("Open file").clicked() {
@@ -259,6 +259,10 @@ fn render_file_context_menu(
             }
         });
         ui.close_menu();
+    }
+    
+    if !is_not_busy {
+        return;
     }
 
     ui.separator();
@@ -336,12 +340,16 @@ fn render_files_delete_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
         return;
     }
 
+    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
+
     let mut is_select_all = false;
     let mut is_deselect_all = false;
-    ui.horizontal(|ui| {
-        is_select_all = ui.button("Select all").clicked();
-        is_deselect_all = ui.button("Deselect all").clicked();
+    ui.add_enabled_ui(is_not_busy, |ui| {
+        ui.horizontal(|ui| {
+            is_select_all = ui.button("Select all").clicked();
+            is_deselect_all = ui.button("Deselect all").clicked();
+        });
     });
     
     render_search_bar(ui, &mut gui.episodes_fuzzy_search);
@@ -361,9 +369,11 @@ fn render_files_delete_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
 
                 ui.horizontal(|ui| {
                     let mut is_enabled = files.get_is_enabled(index);
-                    if ui.checkbox(&mut is_enabled, "").clicked() {
-                        files.set_is_enabled(is_enabled, index);
-                    }
+                    ui.add_enabled_ui(is_not_busy, |ui| {
+                        if ui.checkbox(&mut is_enabled, "").clicked() {
+                            files.set_is_enabled(is_enabled, index);
+                        }
+                    });
                     if is_select_all {
                         files.set_is_enabled(true, index);
                     }
@@ -385,11 +395,11 @@ fn render_files_delete_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
                                 *folder.get_selected_descriptor().blocking_write() = *descriptor;
                             }
                         }
-                        if res.hovered() {
+                        if is_not_busy && res.hovered() {
                             check_file_shortcuts(ui, &mut files, index);
                         }
                         res.context_menu(|ui| {
-                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index, is_not_busy);
                         });
                     });
 
@@ -412,6 +422,7 @@ fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action:
 
     render_search_bar(ui, &mut gui.episodes_fuzzy_search);
 
+    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
@@ -446,11 +457,11 @@ fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action:
                                 *folder.get_selected_descriptor().blocking_write() = *descriptor;
                             }
                         }
-                        if res.hovered() {
+                        if is_not_busy && res.hovered() {
                             check_file_shortcuts(ui, &mut files, index);
                         }
                         res.context_menu(|ui| {
-                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                            render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index, is_not_busy);
                         });
                     });
                 });
@@ -476,13 +487,16 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
         return;
     }
 
+    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
 
     let mut is_select_all = false;
     let mut is_deselect_all = false;
-    ui.horizontal(|ui| {
-        is_select_all = ui.button("Select all").clicked();
-        is_deselect_all = ui.button("Deselect all").clicked();
+    ui.add_enabled_ui(is_not_busy, |ui| {
+        ui.horizontal(|ui| {
+            is_select_all = ui.button("Select all").clicked();
+            is_deselect_all = ui.button("Deselect all").clicked();
+        });
     });
 
     render_search_bar(ui, &mut gui.episodes_fuzzy_search);
@@ -523,10 +537,12 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
 
                     body.row(row_height, |mut row| {
                         row.col(|ui| {
-                            let mut is_enabled = files.get_is_enabled(index);
-                            if ui.checkbox(&mut is_enabled, "").clicked() {
-                                files.set_is_enabled(is_enabled, index);
-                            }
+                            ui.add_enabled_ui(is_not_busy, |ui| {
+                                let mut is_enabled = files.get_is_enabled(index);
+                                if ui.checkbox(&mut is_enabled, "").clicked() {
+                                    files.set_is_enabled(is_enabled, index);
+                                }
+                            });
                         });
                         row.col(|ui| {
                             let descriptor = files.get_src_descriptor(index);
@@ -546,20 +562,22 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
                                     *folder.get_selected_descriptor().blocking_write() = *descriptor;
                                 }
                             }
-                            if res.hovered() {
+                            if is_not_busy && res.hovered() {
                                 check_file_shortcuts(ui, &mut files, index);
                             }
                             res.context_menu(|ui| {
-                                render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                                render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index, is_not_busy);
                             });
                         });
                         row.col(|ui| {
-                            let mut dest_edit_buffer = files.get_dest(index).to_string();
-                            let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
-                            let res = ui.add_sized(ui.available_size(), elem);
-                            if res.changed() {
-                                files.set_dest(dest_edit_buffer, index);
-                            }
+                            ui.add_enabled_ui(is_not_busy, |ui| {
+                                let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
+                                let res = ui.add_sized(ui.available_size(), elem);
+                                if res.changed() {
+                                    files.set_dest(dest_edit_buffer, index);
+                                }
+                            });
                         });
                     });
 
@@ -571,6 +589,7 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
 fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     let file_tracker = folder.get_file_tracker().blocking_read();
     let mut files = folder.get_mut_files_blocking(); 
+    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     
     // link the column widths across all of the tables
@@ -634,10 +653,12 @@ fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
                         body.row(row_height, |mut row| {
                             row.col(|ui| {
                                 if action == Action::Rename || action == Action::Delete {
-                                    let mut is_enabled = files.get_is_enabled(index);
-                                    if ui.checkbox(&mut is_enabled, "").clicked() {
-                                        files.set_is_enabled(is_enabled, index);
-                                    }
+                                    ui.add_enabled_ui(is_not_busy, |ui| {
+                                        let mut is_enabled = files.get_is_enabled(index);
+                                        if ui.checkbox(&mut is_enabled, "").clicked() {
+                                            files.set_is_enabled(is_enabled, index);
+                                        }
+                                    });
                                 }
                                 current_column_widths[0] = ui.available_width();
                             });
@@ -654,22 +675,24 @@ fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
                                         *folder.get_selected_descriptor().blocking_write() = *descriptor;
                                     }
                                 }
-                                if res.hovered() {
+                                if is_not_busy && res.hovered() {
                                     check_file_shortcuts(ui, &mut files, index);
                                 }
                                 res.context_menu(|ui| {
-                                    render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                                    render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index, is_not_busy);
                                 });
                                 current_column_widths[1] = ui.available_width();
                             });
                             row.col(|ui| {
                                 if action == Action::Rename {
-                                    let mut dest_edit_buffer = files.get_dest(index).to_string();
-                                    let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
-                                    let res = ui.add_sized(ui.available_size(), elem);
-                                    if res.changed() {
-                                        files.set_dest(dest_edit_buffer, index);
-                                    }
+                                    ui.add_enabled_ui(is_not_busy, |ui| {
+                                        let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                        let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
+                                        let res = ui.add_sized(ui.available_size(), elem);
+                                        if res.changed() {
+                                            files.set_dest(dest_edit_buffer, index);
+                                        }
+                                    });
                                 }
                                 current_column_widths[2] = ui.available_width();
                             });
@@ -928,9 +951,7 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
                     ui.push_id("folder_files_list", |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             if !gui.show_episode_cache_search {
-                                ui.add_enabled_ui(is_not_busy, |ui| {
-                                    render_files_list(gui, ui, &folder);
-                                });
+                                render_files_list(gui, ui, &folder);
                             } else {
                                 render_episode_cache_search(gui, ui, &folder);
                             }
@@ -944,18 +965,18 @@ lazy_static! {
     static ref FOLDER_STATUS_ICONS: enum_map::EnumMap<FolderStatus, egui::RichText> = enum_map::enum_map! {
         FolderStatus::Unknown => egui::RichText::new("？").strong().color(egui::Color32::DARK_RED),
         FolderStatus::Empty => egui::RichText::new("O").strong().color(egui::Color32::GRAY),
-        FolderStatus::Pending => egui::RichText::new("↺").strong().color(egui::Color32::DARK_BLUE),
+        FolderStatus::Pending => egui::RichText::new("🖹").strong().color(egui::Color32::DARK_BLUE),
         FolderStatus::Done => egui::RichText::new("✔").strong().color(egui::Color32::DARK_GREEN),
     };
 }
 
-fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus) {
-    let size = egui::vec2(
-        20.0,
-        ui.spacing().interact_size.y,
-    );
+fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus, is_busy: bool) {
     let height = ui.text_style_height(&egui::TextStyle::Monospace);
-    let icon = FOLDER_STATUS_ICONS[status].clone().size(height);
+    let size = egui::vec2(height, height);
+    let icon = match is_busy {
+        false => FOLDER_STATUS_ICONS[status].clone().size(height),
+        true => egui::RichText::new("↻").strong().size(height),
+    };
     ui.add_sized(size, egui::Label::new(icon));
 }
 
@@ -1063,7 +1084,8 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
                 }
 
                 ui.horizontal(|ui| {
-                    render_folder_status(ui, status);
+                    let is_busy = folder.get_busy_lock().try_lock().is_err();
+                    render_folder_status(ui, status, is_busy);
                     let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
                     ui.with_layout(layout, |ui| {
                         let is_selected = selected_index == Some(index);
