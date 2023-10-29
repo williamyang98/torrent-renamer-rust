@@ -70,14 +70,19 @@ enum FileTab {
 struct GuiApp {
     app: Arc<App>,
     runtime: tokio::runtime::Runtime,
+
+    is_folder_busy_check_thread_spawned: bool,
+
+    folders_fuzzy_search: FuzzySearcher,
+    folders_filter: enum_map::EnumMap<FolderStatus, bool>,
+
     selected_tab: FileTab,
+    show_episode_cache_search: bool,
+    episodes_fuzzy_search: FuzzySearcher,
+
     show_series_search: bool,
     series_api_search: String,
     series_fuzzy_search: FuzzySearcher,
-    episodes_fuzzy_search: FuzzySearcher,
-    folders_fuzzy_search: FuzzySearcher,
-    folders_filter: enum_map::EnumMap<FolderStatus, bool>,
-    show_episode_cache_search: bool,
 }
 
 impl GuiApp {
@@ -85,14 +90,19 @@ impl GuiApp {
         Self {
             app,
             runtime,
-            show_series_search: false,
-            selected_tab: FileTab::FileAction(Action::Complete),
-            series_api_search: "".to_string(),
-            series_fuzzy_search: FuzzySearcher::new(),
-            episodes_fuzzy_search: FuzzySearcher::new(),
+
+            is_folder_busy_check_thread_spawned: false,
+
             folders_fuzzy_search: FuzzySearcher::new(),
             folders_filter: enum_map::enum_map! { _ => true },
+
+            selected_tab: FileTab::FileAction(Action::Complete),
+            episodes_fuzzy_search: FuzzySearcher::new(),
             show_episode_cache_search: false,
+
+            show_series_search: false,
+            series_api_search: "".to_string(),
+            series_fuzzy_search: FuzzySearcher::new(),
         }
     }
 }
@@ -191,12 +201,6 @@ fn render_search_bar(ui: &mut egui::Ui, search_bar: &mut FuzzySearcher) {
 
 fn render_errors_list(ui: &mut egui::Ui, errors: &mut Vec<String>) {
     egui::ScrollArea::vertical().show(ui, |ui| {
-        let total_items = errors.len();
-        if total_items == 0 {
-            ui.label("No errors");
-            return;
-        }
-        
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
             let mut selected_index = None;
@@ -887,7 +891,7 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
             folder.perform_initial_load().await
         }
     });
-    
+
     egui::TopBottomPanel::top("folder_controls")
         .resizable(false)
         .show_inside(ui, |ui| {
@@ -895,17 +899,7 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
                 render_folder_controls(gui, ui, &folder);
             });
         });
-
-    egui::TopBottomPanel::bottom("folder_error_list")
-        .resizable(true)
-        .show_inside(ui, |ui| {
-            if let Ok(mut errors) = folder.get_errors().try_write() {
-                render_errors_list(ui, errors.as_mut());
-            } else {
-                ui.spinner();
-            }
-        });
-
+    
     egui::SidePanel::right("folder_info")
         .resizable(true)
         .show_inside(ui, |ui| {
@@ -917,18 +911,32 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
         });
 
     egui::CentralPanel::default()
+        .frame(egui::Frame::none())
         .show_inside(ui, |ui| {
-            ui.push_id("folder_files_list", |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    if !gui.show_episode_cache_search {
-                        ui.add_enabled_ui(is_not_busy, |ui| {
-                            render_files_list(gui, ui, &folder);
+            if let Ok(mut errors) = folder.get_errors().try_write() {
+                if !errors.is_empty() {
+                    egui::TopBottomPanel::bottom("folder_error_list")
+                        .resizable(true)
+                        .show_inside(ui, |ui| {
+                            render_errors_list(ui, errors.as_mut());
                         });
-                    } else {
-                        render_episode_cache_search(gui, ui, &folder);
-                    }
+                }
+            } 
+
+            egui::CentralPanel::default()
+                .show_inside(ui, |ui| {
+                    ui.push_id("folder_files_list", |ui| {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            if !gui.show_episode_cache_search {
+                                ui.add_enabled_ui(is_not_busy, |ui| {
+                                    render_files_list(gui, ui, &folder);
+                                });
+                            } else {
+                                render_episode_cache_search(gui, ui, &folder);
+                            }
+                        });
+                    });
                 });
-            });
         });
 }
 
@@ -961,8 +969,6 @@ fn render_invisible_width_widget(ui: &mut egui::Ui) {
 }
 
 fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
-    render_invisible_width_widget(ui);
-
     let folders = gui.app.get_folders().blocking_read();
     let is_busy = gui.app.get_folders_busy_lock().try_lock().is_err();
     let total_folders = folders.len();
@@ -1421,10 +1427,51 @@ fn render_episode_cache_search(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Create a thread that refreshes ui when folders are updated
+        if !self.is_folder_busy_check_thread_spawned {
+            self.is_folder_busy_check_thread_spawned = true;
+            let ctx = ctx.clone();
+            let app = self.app.clone();
+            self.runtime.spawn(async move {
+                let mut old_busy_count = None;
+                loop {
+                    let folders = app.get_folders().read().await;
+                    let mut total_busy_folders = 0;
+                    for folder in folders.iter() {
+                        if folder.get_busy_lock().try_lock().is_err() {
+                            total_busy_folders += 1;
+                        }
+                    }
+                    drop(folders);
+                    
+                    let is_refresh = old_busy_count != Some(total_busy_folders);
+                    old_busy_count = Some(total_busy_folders);
+                    if is_refresh {
+                        ctx.request_repaint();
+                    }
+                    let duration = tokio::time::Duration::from_millis(100);
+                    tokio::time::sleep(duration).await;
+                }
+            });
+        }
         egui::SidePanel::left("Folders")
             .resizable(true)
             .show(ctx, |ui| {
-                render_folders_list_panel(self, ui);
+                render_invisible_width_widget(ui);
+                if let Ok(mut errors) = self.app.get_errors().try_write() {
+                    if !errors.is_empty() {
+                        egui::TopBottomPanel::bottom("app_error_list")
+                            .resizable(true)
+                            .show_inside(ui, |ui| {
+                                render_errors_list(ui, errors.as_mut());
+                            });
+                    }
+                } 
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none())
+                    .show_inside(ui, |ui| {
+                        render_folders_list_panel(self, ui);
+                    });
             });
 
         egui::CentralPanel::default()
