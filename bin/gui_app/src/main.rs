@@ -802,12 +802,16 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
     let is_cache_loaded = folder.is_cache_loaded();
     ui.horizontal(|ui| {
         ui.add_enabled_ui(is_cache_loaded, |ui| {
-            if ui.button("Update file intents").clicked() {
+            let res = ui.button("Update file intents");
+            if res.clicked() {
                 let folder = folder.clone();
                 gui.runtime.spawn(async move {
                     folder.update_file_intents().await
                 });
-            };
+            }
+            res.on_disabled_hover_ui(|ui| {
+                ui.label("Cache is unloaded");  
+            });
         });
 
         if ui.button("Load cache from file").clicked() {
@@ -820,7 +824,8 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
         let session = gui.app.get_login_session().blocking_read();
         let is_cache_refreshable = is_cache_loaded && session.is_some();
         ui.add_enabled_ui(is_cache_refreshable, |ui| {
-            if ui.button("Refresh cache from api").clicked() {
+            let res = ui.button("Refresh cache from api");
+            if res.clicked() {
                 if let Some(session) = session.as_ref() {
                     gui.runtime.spawn({
                         let folder = folder.clone();
@@ -832,7 +837,12 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
                         }
                     });
                 }
-            };
+            }
+            
+            res.on_disabled_hover_ui(|ui| {
+                if !is_cache_loaded   { ui.label("Cache is unloaded"); }
+                if !session.is_some() { ui.label("Not logged in"); }
+            });
         });
 
         if ui.button("Execute changes").clicked() {
@@ -845,7 +855,10 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
         
         ui.toggle_value(&mut gui.show_series_search, "Search series");
         ui.add_enabled_ui(is_cache_loaded, |ui| {
-            ui.toggle_value(&mut gui.show_episode_cache_search, "Search episodes");
+            let res = ui.toggle_value(&mut gui.show_episode_cache_search, "Search episodes");
+            res.on_disabled_hover_ui(|ui| {
+                ui.label("Cache is unloaded");
+            });
         });
     });
 }
@@ -1021,8 +1034,8 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
         }
     }
 
-    ui.add_enabled_ui(!is_busy, |ui| {
-        ui.horizontal(|ui| {
+    ui.horizontal(|ui| {
+        ui.add_enabled_ui(!is_busy, |ui| {
             if ui.button("Refresh all").clicked() {
                 gui.runtime.spawn({
                     let app = gui.app.clone();
@@ -1038,6 +1051,28 @@ fn render_folders_list_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
                         app.load_folders_from_existing_root_path().await
                     }
                 });
+            }
+        });
+
+        if ui.button("Login").clicked() {
+            gui.runtime.spawn({
+                let app = gui.app.clone();
+                async move {
+                    app.login().await
+                }
+            });
+        }
+
+        let is_logged_in = gui.app.get_login_session().blocking_read().is_some();
+        let login_icon = match is_logged_in {
+            true => egui::RichText::new("✔").strong().color(egui::Color32::DARK_GREEN),
+            false => egui::RichText::new("🗙").strong().color(egui::Color32::DARK_RED),
+        };
+        ui.label(login_icon).on_hover_ui(|ui| {
+            if is_logged_in {
+                ui.label("Login successful");
+            } else {
+                ui.label("Logged out");
             }
         });
     });
@@ -1356,7 +1391,15 @@ fn render_series_search_bar(gui: &mut GuiApp, ui: &mut egui::Ui) {
             .with_main_wrap(false)
             .with_main_align(egui::Align::LEFT);
         ui.with_layout(layout, |ui| {
-            let is_pressed = ui.button("Search").clicked();
+            let is_logged_in = gui.app.get_login_session().blocking_read().is_some();
+            let mut is_pressed = false;
+            ui.add_enabled_ui(is_logged_in, |ui| {
+                let res = ui.button("Search");
+                is_pressed = res.clicked();
+                res.on_disabled_hover_ui(|ui| {
+                    ui.label("Not logged in");
+                });
+            });
 
             let elem = egui::TextEdit::singleline(&mut gui.series_api_search);
             let size = egui::vec2(

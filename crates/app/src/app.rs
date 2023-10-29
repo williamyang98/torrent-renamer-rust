@@ -21,17 +21,14 @@ pub struct Credentials {
 pub enum AppInitError {
     #[error("failed to load filter rules from file: {}", .0)]
     IOFilterRulesLoad(std::io::Error),
-    #[error("failed to load credentials from file: {}", .0)]
-    IOCredentialsLoad(std::io::Error),
     #[error("json decode on filter rules: {}", .0)]
     JsonDecodeFilterRules(serde_json::Error),
-    #[error("json decode on credentials: {}", .0)]
-    JsonDecodeCredentials(serde_json::Error),
 }
 
 pub struct App {
     filter_rules: Arc<FilterRules>,
-    credentials: Credentials,
+    config_path: String,
+
     client: Arc<reqwest::Client>,
     login_session: RwLock<Option<Arc<LoginSession>>>,
     
@@ -49,22 +46,15 @@ pub struct App {
 
 impl App {
     pub async fn new(config_path: &str) -> Result<App, AppInitError> {
-        let (filter_rules_str, credentials_str) = tokio::join!(
-            tokio::fs::read_to_string(format!("{}/app_config.json", config_path)),
-            tokio::fs::read_to_string(format!("{}/credentials.json", config_path)),
-        );
-
+        let filter_rules_str = tokio::fs::read_to_string(format!("{}/app_config.json", config_path)).await;
         let filter_rules_str = filter_rules_str.map_err(AppInitError::IOFilterRulesLoad)?;
-        let credentials_str = credentials_str.map_err(AppInitError::IOCredentialsLoad)?;
-
         let filter_rules: FilterRules = serde_json::from_str(filter_rules_str.as_str())
             .map_err(AppInitError::JsonDecodeFilterRules)?;
-        let credentials: Credentials = serde_json::from_str(credentials_str.as_str())
-            .map_err(AppInitError::JsonDecodeCredentials)?;
-        
+
         Ok(App {
             filter_rules: Arc::new(filter_rules),
-            credentials,
+            config_path: config_path.to_string(),
+
             client: Arc::new(reqwest::Client::new()),
             login_session: RwLock::new(None),
             
@@ -84,12 +74,33 @@ impl App {
 
 impl App {
     pub async fn login(&self) -> Option<()> {
-        let token = tvdb::api::login(self.client.as_ref(), &self.credentials.login_info).await;
+        let credentials_str = tokio::fs::read_to_string(format!("{}/credentials.json", self.config_path.as_str())).await;
+        
+        let credentials_str = match credentials_str {
+            Ok(data) => data,
+            Err(err) => {
+                let message = format!("Login failed since credentials could not be loaded from file: {}", err);
+                self.errors.write().await.push(message);
+                return None;
+            },
+        };
+
+        let credentials: Credentials = match serde_json::from_str(credentials_str.as_str()) {
+            Ok(data) => data,
+            Err(err) => {
+                let message = format!("Login failed since credentials could not be deserialised from json: {}", err);
+                self.errors.write().await.push(message);
+                return None;
+            },
+        };
+        let token = tvdb::api::login(self.client.as_ref(), &credentials.login_info).await;
         let token = match token {
             Ok(token) => token,
             Err(err) => {
-                let message = format!("Error on tvdb api login: {}", err);
+                let message = format!("Login failed at tvdb api: {}", err);
                 self.errors.write().await.push(message);
+                // If login failed at this point it's possible credentials were invalidated externally
+                *self.login_session.write().await = None;
                 return None;
             },
         };
