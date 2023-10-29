@@ -323,14 +323,12 @@ fn render_file_bookmarks(ui: &mut egui::Ui, bookmark: &mut Bookmark) -> bool {
     is_changed
 }
 
-fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action, folder: &Arc<AppFolder>) {
+fn render_files_delete_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     let file_tracker = folder.get_file_tracker().blocking_read();
     let mut files = folder.get_mut_files_blocking(); 
-    let mut bookmarks = folder.get_bookmarks().blocking_write();
-    let mut is_bookmarks_changed = false;
 
-    if file_tracker.get_action_count()[selected_action] == 0 {
-        ui.heading(format!("No {}s", selected_action.to_str().to_lowercase()));
+    if file_tracker.get_action_count()[Action::Delete] == 0 {
+        ui.heading(format!("No {}s", Action::Delete.to_str().to_lowercase()));
         return;
     }
 
@@ -349,7 +347,7 @@ fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_ac
         ui.with_layout(layout, |ui| {
             for index in 0..files.get_total_items() {
                 let action = files.get_action(index);
-                if action != selected_action {
+                if action != Action::Delete {
                     continue;
                 }
                 
@@ -367,12 +365,6 @@ fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_ac
                     }
                     if is_deselect_all {
                         files.set_is_enabled(false, index);
-                    }
-                    
-                    {
-                        let src = files.get_src(index);
-                        let bookmark = bookmarks.get_mut_with_insert(src);
-                        is_bookmarks_changed = render_file_bookmarks(ui, bookmark) || is_bookmarks_changed;
                     }
 
                     let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
@@ -401,15 +393,6 @@ fn render_files_selectable_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_ac
             }
         });
     });
-
-    if is_bookmarks_changed {
-        gui.runtime.spawn({
-            let folder = folder.clone();
-            async move {
-                folder.save_bookmarks_to_file().await
-            }
-        });
-    }
 }
 
 fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action: Action, folder: &Arc<AppFolder>) {
@@ -438,7 +421,7 @@ fn render_files_basic_list(gui: &mut GuiApp, ui: &mut egui::Ui, selected_action:
                 if !gui.episodes_fuzzy_search.search(files.get_src(index)) {
                     continue;
                 }
-                
+
                 ui.horizontal(|ui| {
                     {
                         let src = files.get_src(index);
@@ -499,58 +482,166 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
     });
 
     render_search_bar(ui, &mut gui.episodes_fuzzy_search);
+   
+    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+    ui.with_layout(layout, |ui| {
+        let cell_layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+        let row_height = 18.0;
+        TableBuilder::new(ui)
+            .striped(true)
+            .resizable(true)
+            .cell_layout(cell_layout)
+            .column(Column::initial(0.0).resizable(false).clip(false))
+            .column(Column::auto().resizable(true).clip(true))
+            .column(Column::remainder().resizable(false).clip(true))
+            .header(row_height, |mut header| {
+                header.col(|_| {});
+                header.col(|ui| { ui.strong("Source"); });
+                header.col(|ui| { ui.strong("Destination"); });
+            })
+            .body(|mut body| {
+                for index in 0..files.get_total_items() {
+                    let action = files.get_action(index);
+                    if action != Action::Rename {
+                        continue;
+                    }
+
+                    if !gui.episodes_fuzzy_search.search(files.get_src(index)) {
+                        continue;
+                    }
+
+                    if is_select_all {
+                        files.set_is_enabled(true, index);
+                    }
+                    if is_deselect_all {
+                        files.set_is_enabled(false, index);
+                    }
+
+                    body.row(row_height, |mut row| {
+                        row.col(|ui| {
+                            let mut is_enabled = files.get_is_enabled(index);
+                            if ui.checkbox(&mut is_enabled, "").clicked() {
+                                files.set_is_enabled(is_enabled, index);
+                            }
+                        });
+                        row.col(|ui| {
+                            let descriptor = files.get_src_descriptor(index);
+                            let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
+                            let is_conflict = files.get_is_conflict(index);
+                            let src = files.get_src(index);
+                            let mut label = egui::RichText::new(src);
+                            if is_conflict {
+                                label = label.color(egui::Color32::DARK_RED)
+                            }
+                            let elem = ClippedSelectableLabel::new(is_selected, label);
+                            let res = ui.add(elem);
+                            if res.clicked() {
+                                if is_selected {
+                                    *folder.get_selected_descriptor().blocking_write() = None;
+                                } else {
+                                    *folder.get_selected_descriptor().blocking_write() = *descriptor;
+                                }
+                            }
+                            if res.hovered() {
+                                check_file_shortcuts(ui, &mut files, index);
+                            }
+                            res.context_menu(|ui| {
+                                render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
+                            });
+                        });
+                        row.col(|ui| {
+                            let mut dest_edit_buffer = files.get_dest(index).to_string();
+                            let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
+                            let res = ui.add_sized(ui.available_size(), elem);
+                            if res.changed() {
+                                files.set_dest(dest_edit_buffer, index);
+                            }
+                        });
+                    });
+
+                }
+            });
+    });
+}
+
+fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let file_tracker = folder.get_file_tracker().blocking_read();
+    let mut files = folder.get_mut_files_blocking(); 
+    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
     
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
-        ui.with_layout(layout, |ui| {
+    // link the column widths across all of the tables
+    let mut column_widths: Option<[f32;3]> = None;
+    let mut is_add_separator = false;
+    let mut total_conflicts = 0;
+    for (row_id, (dest, indices)) in file_tracker.get_pending_writes().iter().enumerate() {
+        let mut total_files = indices.len();
+        if total_files == 0 {
+            continue;
+        }
+        let source_index = file_tracker.get_source_index(dest.as_str());
+        if source_index.is_some() {
+            total_files += 1;
+        }
+        let is_conflict = total_files > 1;
+        if !is_conflict {
+            continue;
+        }
+        total_conflicts += 1;
+
+        ui.push_id(row_id, |ui| {
+            if is_add_separator {
+                ui.separator();
+            }
+            is_add_separator = true;
+
+            ui.label(egui::RichText::new(dest).strong().size(13.0));
+
             let row_height = 18.0;
-            TableBuilder::new(ui)
+            let cell_layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+            let mut table = TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
-                .cell_layout(layout)
-                .column(Column::auto_with_initial_suggestion(0.0).resizable(false).clip(true))
-                .column(Column::auto().resizable(true).clip(true))
-                .column(Column::remainder().resizable(false).clip(true))
+                .cell_layout(cell_layout);
+            table = match column_widths {
+                Some(widths) => {
+                    table
+                        .column(Column::exact(widths[0]).resizable(false).clip(false))
+                        .column(Column::exact(widths[1]).resizable(true).clip(true))
+                        .column(Column::exact(widths[2]).resizable(false).clip(true))
+                },
+                None => {
+                    table
+                        .column(Column::auto_with_initial_suggestion(0.0).resizable(false).clip(false))
+                        .column(Column::remainder().resizable(true).clip(true))
+                        .column(Column::remainder().resizable(false).clip(true))
+                }
+            };
+
+            table
                 .header(row_height, |mut header| {
                     header.col(|_| {});
                     header.col(|ui| { ui.strong("Source"); });
                     header.col(|ui| { ui.strong("Destination"); });
                 })
                 .body(|mut body| {
-                    for index in 0..files.get_total_items() {
-                        let action = files.get_action(index);
-                        if action != Action::Rename {
-                            continue;
-                        }
-
-                        if !gui.episodes_fuzzy_search.search(files.get_src(index)) {
-                            continue;
-                        }
-
-                        if is_select_all {
-                            files.set_is_enabled(true, index);
-                        }
-                        if is_deselect_all {
-                            files.set_is_enabled(false, index);
-                        }
-
+                    let mut render_entry = |index: usize| {
+                        let action = files.get_action(index); 
+                        let mut current_column_widths: [f32;3] = [0.0,0.0,0.0];
                         body.row(row_height, |mut row| {
                             row.col(|ui| {
-                                let mut is_enabled = files.get_is_enabled(index);
-                                if ui.checkbox(&mut is_enabled, "").clicked() {
-                                    files.set_is_enabled(is_enabled, index);
+                                if action == Action::Rename || action == Action::Delete {
+                                    let mut is_enabled = files.get_is_enabled(index);
+                                    if ui.checkbox(&mut is_enabled, "").clicked() {
+                                        files.set_is_enabled(is_enabled, index);
+                                    }
                                 }
+                                current_column_widths[0] = ui.available_width();
                             });
                             row.col(|ui| {
                                 let descriptor = files.get_src_descriptor(index);
                                 let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                                let is_conflict = files.get_is_conflict(index);
                                 let src = files.get_src(index);
-                                let mut label = egui::RichText::new(src);
-                                if is_conflict {
-                                    label = label.color(egui::Color32::DARK_RED)
-                                }
-                                let elem = ClippedSelectableLabel::new(is_selected, label);
+                                let elem = ClippedSelectableLabel::new(is_selected, src);
                                 let res = ui.add(elem);
                                 if res.clicked() {
                                     if is_selected {
@@ -565,152 +656,41 @@ fn render_files_rename_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<Ap
                                 res.context_menu(|ui| {
                                     render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
                                 });
+                                current_column_widths[1] = ui.available_width();
                             });
                             row.col(|ui| {
-                                let mut dest_edit_buffer = files.get_dest(index).to_string();
-                                let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
-                                let res = ui.add_sized(ui.available_size(), elem);
-                                if res.changed() {
-                                    files.set_dest(dest_edit_buffer, index);
+                                if action == Action::Rename {
+                                    let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                    let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
+                                    let res = ui.add_sized(ui.available_size(), elem);
+                                    if res.changed() {
+                                        files.set_dest(dest_edit_buffer, index);
+                                    }
                                 }
+                                current_column_widths[2] = ui.available_width();
                             });
+                            if column_widths.is_none() {
+                                column_widths = Some(current_column_widths);
+                            }
                         });
+                    };
 
+                    if let Some(index) = source_index {
+                        if !indices.contains(index) {
+                            render_entry(*index);
+                        }
+                    }
+
+                    for index in indices {
+                        render_entry(*index);
                     }
                 });
         });
-    });
+    }
 
-}
-
-fn render_files_conflicts_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
-    let file_tracker = folder.get_file_tracker().blocking_read();
-    let mut files = folder.get_mut_files_blocking(); 
-    let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
-    
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
-        ui.with_layout(layout, |ui| {
-            // keep track of when to add separators
-            let mut is_first = true;
-            let mut total_conflicts = 0;
-            let mut column_width = None;
-            for (row_id, (dest, indices)) in file_tracker.get_pending_writes().iter().enumerate() {
-                let mut total_files = indices.len();
-                if total_files == 0 {
-                    continue;
-                }
-                let source_index = file_tracker.get_source_index(dest.as_str());
-                if source_index.is_some() {
-                    total_files += 1;
-                }
-                let is_conflict = total_files > 1;
-                if !is_conflict {
-                    continue;
-                }
-                total_conflicts += 1;
-
-                ui.push_id(row_id, |ui| {
-                    if !is_first {
-                        ui.separator();
-                    }
-                    is_first = false;
-
-                    ui.heading(dest);
-
-                    let row_height = 18.0;
-                    let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
-                    ui.with_layout(layout, |ui| {
-                        let mut table = TableBuilder::new(ui)
-                            .striped(true)
-                            .resizable(true)
-                            .cell_layout(layout)
-                            .column(Column::auto_with_initial_suggestion(0.0).resizable(false).clip(true));
-
-                        table = if let Some(width) = column_width {
-                            table
-                                .column(Column::exact(width).resizable(true).clip(true))
-                                .column(Column::remainder().resizable(false).clip(true))
-                        } else {
-                            table
-                                .column(Column::remainder().resizable(true).clip(true))
-                                .column(Column::remainder().resizable(false).clip(true))
-                        };
-
-                        table
-                            .header(row_height, |mut header| {
-                                header.col(|_| {});
-                                header.col(|ui| { ui.strong("Source"); });
-                                header.col(|ui| { ui.strong("Destination"); });
-                            })
-                            .body(|mut body| {
-                                let mut render_entry = |index: usize| {
-                                    let action = files.get_action(index); 
-                                    body.row(row_height, |mut row| {
-                                        row.col(|ui| {
-                                            if action == Action::Rename || action == Action::Delete {
-                                                let mut is_enabled = files.get_is_enabled(index);
-                                                if ui.checkbox(&mut is_enabled, "").clicked() {
-                                                    files.set_is_enabled(is_enabled, index);
-                                                }
-                                            }
-                                        });
-                                        row.col(|ui| {
-                                            // Link the table width across all entries
-                                            if column_width.is_none() {
-                                                column_width = Some(ui.available_width());
-                                            }
-                                            let descriptor = files.get_src_descriptor(index);
-                                            let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                                            let src = files.get_src(index);
-                                            let elem = ClippedSelectableLabel::new(is_selected, src);
-                                            let res = ui.add(elem);
-                                            if res.clicked() {
-                                                if is_selected {
-                                                    *folder.get_selected_descriptor().blocking_write() = None;
-                                                } else {
-                                                    *folder.get_selected_descriptor().blocking_write() = *descriptor;
-                                                }
-                                            }
-                                            if res.hovered() {
-                                                check_file_shortcuts(ui, &mut files, index);
-                                            }
-                                            res.context_menu(|ui| {
-                                                render_file_context_menu(gui, ui, folder.get_folder_path(), &mut files, index);
-                                            });
-                                        });
-                                        row.col(|ui| {
-                                            if action == Action::Rename {
-                                                let mut dest_edit_buffer = files.get_dest(index).to_string();
-                                                let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
-                                                let res = ui.add_sized(ui.available_size(), elem);
-                                                if res.changed() {
-                                                    files.set_dest(dest_edit_buffer, index);
-                                                }
-                                            }
-                                        });
-                                    });
-                                };
-
-                                if let Some(index) = source_index {
-                                    let index = *index;
-                                    render_entry(index);
-                                }
-
-                                for index in indices {
-                                    let index = *index;
-                                    render_entry(index);
-                                }
-                            });
-                    });
-                });
-            }
-
-            if total_conflicts == 0 {
-                ui.heading("No conflicts");
-            }
-        });
-    });
+    if total_conflicts == 0 {
+        ui.heading("No conflicts");
+    }
 }
 
 fn render_files_tab_bar(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
@@ -768,10 +748,16 @@ fn render_files_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder
         match gui.selected_tab {
             FileTab::FileAction(action) => match action {
                 Action::Rename => render_files_rename_list(gui, ui, folder),
-                Action::Delete => render_files_selectable_list(gui, ui, action, folder),
+                Action::Delete => render_files_delete_list(gui, ui, folder),
                 _ => render_files_basic_list(gui, ui, action, folder),
             },
-            FileTab::Conflicts => render_files_conflicts_list(gui, ui, folder),
+            FileTab::Conflicts => {
+                ui.push_id("conflicts_list", |ui| {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        render_files_conflicts_list(gui, ui, folder);
+                    });
+                });
+            },
         };
     }
     
@@ -779,13 +765,16 @@ fn render_files_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder
 }
 
 fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
+    let is_cache_loaded = folder.is_cache_loaded();
     ui.horizontal(|ui| {
-        if ui.button("Update file intents").clicked() {
-            let folder = folder.clone();
-            gui.runtime.spawn(async move {
-                folder.update_file_intents().await
-            });
-        };
+        ui.add_enabled_ui(is_cache_loaded, |ui| {
+            if ui.button("Update file intents").clicked() {
+                let folder = folder.clone();
+                gui.runtime.spawn(async move {
+                    folder.update_file_intents().await
+                });
+            };
+        });
 
         if ui.button("Load cache from file").clicked() {
             let folder = folder.clone();
@@ -793,19 +782,24 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
                 folder.load_cache_from_file().await
             });
         };
-
-        if ui.button("Refresh cache from api").clicked() {
-            let folder = folder.clone();
-            let session = gui.app.get_login_session().clone();
-            gui.runtime.spawn(async move {
-                let session_guard = session.read().await;
-                if let Some(session) = session_guard.as_ref() {
-                    folder.refresh_cache_from_api(session.clone()).await?;
-                    folder.save_cache_to_file().await?;
+        
+        let session = gui.app.get_login_session().blocking_read();
+        let is_cache_refreshable = is_cache_loaded && session.is_some();
+        ui.add_enabled_ui(is_cache_refreshable, |ui| {
+            if ui.button("Refresh cache from api").clicked() {
+                if let Some(session) = session.as_ref() {
+                    gui.runtime.spawn({
+                        let folder = folder.clone();
+                        let session = session.clone();
+                        async move {
+                            folder.refresh_cache_from_api(session).await?;
+                            folder.save_cache_to_file().await?;
+                            Some(())
+                        }
+                    });
                 }
-                Some(())
-            });
-        };
+            };
+        });
 
         if ui.button("Execute changes").clicked() {
             let folder = folder.clone();
@@ -816,7 +810,7 @@ fn render_folder_controls(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppF
         };
         
         ui.toggle_value(&mut gui.show_series_search, "Search series");
-        ui.add_enabled_ui(folder.is_cache_loaded(), |ui| {
+        ui.add_enabled_ui(is_cache_loaded, |ui| {
             ui.toggle_value(&mut gui.show_episode_cache_search, "Search episodes");
         });
     });
@@ -836,9 +830,7 @@ fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     
     ui.heading("Series");
     ui.push_id("series_table", |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            render_series_table(ui, &cache.series);
-        });
+        render_series_table(ui, &cache.series);
     });
 
     ui.separator();
@@ -870,9 +862,7 @@ fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
     };
     
     ui.push_id("episodes_table", |ui| {
-        egui::ScrollArea::vertical().show(ui, |ui| {
-            render_episode_table(ui, episode);
-        });
+        render_episode_table(ui, episode);
     });
 }
 
@@ -928,21 +918,17 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
 
     egui::CentralPanel::default()
         .show_inside(ui, |ui| {
-            if !gui.show_episode_cache_search {
-                ui.push_id("folder_files_list", |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.push_id("folder_files_list", |ui| {
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    if !gui.show_episode_cache_search {
                         ui.add_enabled_ui(is_not_busy, |ui| {
                             render_files_list(gui, ui, &folder);
                         });
-                    });
-                });
-            } else {
-                ui.push_id("folder_episode_cache_search", |ui| {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
+                    } else {
                         render_episode_cache_search(gui, ui, &folder);
-                    });
+                    }
                 });
-            }
+            });
         });
 }
 
@@ -1128,11 +1114,12 @@ fn render_series_search_list(gui: &mut GuiApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
+            let cell_layout = egui::Layout::left_to_right(egui::Align::Center).with_cross_justify(false);
             let row_height = 18.0;
             TableBuilder::new(ui)
                 .striped(true)
                 .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_justify(false))
+                .cell_layout(cell_layout)
                 .column(Column::remainder().resizable(true).clip(true))
                 .column(Column::auto().resizable(false))
                 .column(Column::auto().resizable(false))
@@ -1379,63 +1366,57 @@ fn render_episode_cache_search(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc
 
     render_search_bar(ui, &mut gui.episodes_fuzzy_search);
     
+    // Create a string that we can search for each episode
     let mut episode_name = String::new();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
-    egui::ScrollArea::vertical().show(ui, |ui| {
-        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
-        ui.with_layout(layout, |ui| {
-            let row_height = 18.0;
-            TableBuilder::new(ui)
-                .striped(true)
-                .resizable(true)
-                .cell_layout(egui::Layout::left_to_right(egui::Align::Center).with_cross_justify(false))
-                .column(Column::remainder().resizable(true).clip(true))
-                .column(Column::auto().resizable(false))
-                .column(Column::auto().resizable(false))
-                .column(Column::auto().resizable(false))
-                .header(row_height, |mut header| {
-                    header.col(|ui| { ui.strong("Name"); });
-                    header.col(|ui| { ui.strong("First Aired"); });
-                })
-                .body(|mut body| {
-                    for entry in episodes {
-                        use std::fmt::Write;
-                        episode_name.clear();
-                        let _ = write!(episode_name, "S{:02}E{:02}", entry.season, entry.episode);
-                        if let Some(name) = entry.name.as_deref() {
-                            let _ = write!(episode_name, " {}", name);
-                        }
-                        if !gui.episodes_fuzzy_search.search(episode_name.as_str()) {
-                            continue;
-                        }
+    let row_height = 18.0;
+    let cell_layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+    TableBuilder::new(ui)
+        .striped(true)
+        .resizable(true)
+        .cell_layout(cell_layout)
+        .column(Column::remainder().resizable(true).clip(true))
+        .column(Column::auto().resizable(false))
+        .header(row_height, |mut header| {
+            header.col(|ui| { ui.strong("Name"); });
+            header.col(|ui| { ui.strong("First Aired"); });
+        })
+        .body(|mut body| {
+            for entry in episodes {
+                use std::fmt::Write;
+                episode_name.clear();
+                let _ = write!(episode_name, "S{:02}E{:02}", entry.season, entry.episode);
+                if let Some(name) = entry.name.as_deref() {
+                    let _ = write!(episode_name, " {}", name);
+                }
+                if !gui.episodes_fuzzy_search.search(episode_name.as_str()) {
+                    continue;
+                }
 
-                        body.row(row_height, |mut row| {
-                            row.col(|ui| { 
-                                let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
-                                ui.with_layout(layout, |ui| {
-                                    let descriptor = EpisodeKey { season: entry.season, episode: entry.episode };
-                                    let is_selected = Some(descriptor) == selected_descriptor;
-                                    let elem = ClippedSelectableLabel::new(is_selected, episode_name.as_str());
-                                    let res = ui.add(elem);
-                                    if res.clicked() {
-                                        if is_selected {
-                                            *folder.get_selected_descriptor().blocking_write() = None;
-                                        } else {
-                                            *folder.get_selected_descriptor().blocking_write() = Some(descriptor);
-                                        }
-                                    }
-                                });
-                            });
-                            row.col(|ui| {
-                                let label = entry.first_aired.as_deref().unwrap_or("Unknown");
-                                ui.label(label);
-                            });
+                body.row(row_height, |mut row| {
+                    row.col(|ui| { 
+                        let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
+                        ui.with_layout(layout, |ui| {
+                            let descriptor = EpisodeKey { season: entry.season, episode: entry.episode };
+                            let is_selected = Some(descriptor) == selected_descriptor;
+                            let elem = ClippedSelectableLabel::new(is_selected, episode_name.as_str());
+                            let res = ui.add(elem);
+                            if res.clicked() {
+                                if is_selected {
+                                    *folder.get_selected_descriptor().blocking_write() = None;
+                                } else {
+                                    *folder.get_selected_descriptor().blocking_write() = Some(descriptor);
+                                }
+                            }
                         });
-
-                    }
+                    });
+                    row.col(|ui| {
+                        let label = entry.first_aired.as_deref().unwrap_or("Unknown");
+                        ui.label(label);
+                    });
                 });
+            }
         });
-    });
 }
 
 impl eframe::App for GuiApp {

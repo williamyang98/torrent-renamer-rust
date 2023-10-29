@@ -90,19 +90,19 @@ pub struct AppFolder {
     episodes_path: String,
 
     filter_rules: Arc<FilterRules>,
-    cache: Arc<RwLock<Option<AppFolderCache>>>,
+    cache: RwLock<Option<AppFolderCache>>,
 
-    file_list: Arc<RwLock<Vec<AppFile>>>,
-    file_tracker: Arc<RwLock<FileTracker>>,
-    change_queue: Arc<RwLock<Vec<AppFileChange>>>,
+    file_list: RwLock<Vec<AppFile>>,
+    file_tracker: RwLock<FileTracker>,
+    change_queue: RwLock<Vec<AppFileChange>>,
 
-    bookmarks: Arc<RwLock<BookmarkTable>>,
+    bookmarks: RwLock<BookmarkTable>,
 
-    errors: Arc<RwLock<Vec<String>>>,
-    busy_lock: Arc<Mutex<()>>,
-    selected_descriptor: Arc<RwLock<Option<EpisodeKey>>>,
-    is_initial_load: Arc<Mutex<bool>>,
-    is_file_count_init: Arc<Mutex<bool>>,
+    errors: RwLock<Vec<String>>,
+    busy_lock: Mutex<()>,
+    selected_descriptor: RwLock<Option<EpisodeKey>>,
+    is_initial_load: Mutex<bool>,
+    is_file_count_init: Mutex<bool>,
 }
 
 impl FileTracker {
@@ -188,19 +188,19 @@ impl AppFolder {
             bookmarks_path,
 
             filter_rules,
-            cache: Arc::new(RwLock::new(None)),
+            cache: RwLock::new(None),
 
-            file_list: Arc::new(RwLock::new(Vec::new())),
-            file_tracker: Arc::new(RwLock::new(FileTracker::new())),
-            change_queue: Arc::new(RwLock::new(Vec::new())),
+            file_list: RwLock::new(Vec::new()),
+            file_tracker: RwLock::new(FileTracker::new()),
+            change_queue:RwLock::new(Vec::new()),
 
-            bookmarks: Arc::new(RwLock::new(BookmarkTable::new())),
+            bookmarks: RwLock::new(BookmarkTable::new()),
 
-            errors: Arc::new(RwLock::new(Vec::new())),
-            busy_lock: Arc::new(Mutex::new(())),
-            selected_descriptor: Arc::new(RwLock::new(None)),
-            is_initial_load: Arc::new(Mutex::new(false)),
-            is_file_count_init: Arc::new(Mutex::new(false)),
+            errors: RwLock::new(Vec::new()),
+            busy_lock: Mutex::new(()),
+            selected_descriptor: RwLock::new(None),
+            is_initial_load: Mutex::new(false),
+            is_file_count_init: Mutex::new(false),
         }
     }
 }
@@ -274,7 +274,7 @@ impl AppFolder {
             return FolderStatus::Unknown; 
         }
 
-        let action_count = &self.file_tracker.as_ref().blocking_read().action_count;
+        let action_count = &self.file_tracker.blocking_read().action_count;
         let file_count = Action::iterator()
             .map(|action| action_count[*action])
             .reduce(|acc, v| acc + v);
@@ -340,7 +340,7 @@ impl AppFolder {
         Some(())
     }
 
-    pub fn get_bookmarks(&self) -> &Arc<RwLock<BookmarkTable>> {
+    pub fn get_bookmarks(&self) -> &RwLock<BookmarkTable> {
         &self.bookmarks
     }
 
@@ -642,23 +642,23 @@ impl AppFolder {
         self.folder_name.as_str() 
     }
 
-    pub fn get_file_tracker(&self) -> &Arc<RwLock<FileTracker>> {
+    pub fn get_file_tracker(&self) -> &RwLock<FileTracker> {
         &self.file_tracker
     }
 
-    pub fn get_busy_lock(&self) -> &Arc<Mutex<()>> {
+    pub fn get_busy_lock(&self) -> &Mutex<()> {
         &self.busy_lock
     }
 
-    pub fn get_errors(&self) -> &Arc<RwLock<Vec<String>>> {
+    pub fn get_errors(&self) -> &RwLock<Vec<String>> {
         &self.errors
     }
 
-    pub fn get_selected_descriptor(&self) -> &Arc<RwLock<Option<EpisodeKey>>> {
+    pub fn get_selected_descriptor(&self) -> &RwLock<Option<EpisodeKey>> {
         &self.selected_descriptor
     }
 
-    pub fn get_cache(&self) -> &Arc<RwLock<Option<AppFolderCache>>> {
+    pub fn get_cache(&self) -> &RwLock<Option<AppFolderCache>> {
         &self.cache
     }
 

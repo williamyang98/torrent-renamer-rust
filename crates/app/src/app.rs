@@ -33,18 +33,18 @@ pub struct App {
     filter_rules: Arc<FilterRules>,
     credentials: Credentials,
     client: Arc<reqwest::Client>,
-    login_session: Arc<RwLock<Option<Arc<LoginSession>>>>,
+    login_session: RwLock<Option<Arc<LoginSession>>>,
     
-    root_path: Arc<RwLock<String>>,
-    folders: Arc<RwLock<Vec<Arc<AppFolder>>>>,
-    selected_folder_index: Arc<RwLock<Option<usize>>>,
-    folders_busy_lock: Arc<Mutex<()>>,
+    root_path: RwLock<String>,
+    folders: RwLock<Vec<Arc<AppFolder>>>,
+    selected_folder_index: RwLock<Option<usize>>,
+    folders_busy_lock: Mutex<()>,
 
-    series: Arc<RwLock<Option<Vec<Series>>>>,
-    selected_series_index: Arc<RwLock<Option<usize>>>,
-    series_busy_lock: Arc<Mutex<()>>,
+    series: RwLock<Option<Vec<Series>>>,
+    selected_series_index: RwLock<Option<usize>>,
+    series_busy_lock: Mutex<()>,
 
-    errors: Arc<RwLock<Vec<String>>>,
+    errors: RwLock<Vec<String>>,
 }
 
 impl App {
@@ -66,18 +66,18 @@ impl App {
             filter_rules: Arc::new(filter_rules),
             credentials,
             client: Arc::new(reqwest::Client::new()),
-            login_session: Arc::new(RwLock::new(None)),
+            login_session: RwLock::new(None),
             
-            root_path: Arc::new(RwLock::new(".".to_string())),
-            folders: Arc::new(RwLock::new(Vec::new())),
-            selected_folder_index: Arc::new(RwLock::new(None)),
-            folders_busy_lock: Arc::new(Mutex::new(())),
+            root_path: RwLock::new(".".to_string()),
+            folders: RwLock::new(Vec::new()),
+            selected_folder_index: RwLock::new(None),
+            folders_busy_lock: Mutex::new(()),
 
-            series: Arc::new(RwLock::new(None)),
-            selected_series_index: Arc::new(RwLock::new(None)),
-            series_busy_lock: Arc::new(Mutex::new(())),
+            series: RwLock::new(None),
+            selected_series_index: RwLock::new(None),
+            series_busy_lock: Mutex::new(()),
 
-            errors: Arc::new(RwLock::new(Vec::new())),
+            errors: RwLock::new(Vec::new()),
         })
     }
 }
@@ -99,7 +99,7 @@ impl App {
         Some(())
     }
 
-    pub fn get_login_session(&self) -> &Arc<RwLock<Option<Arc<LoginSession>>>> {
+    pub fn get_login_session(&self) -> &RwLock<Option<Arc<LoginSession>>> {
         &self.login_session
     }
 
@@ -252,7 +252,7 @@ impl App {
         let _busy_lock = self.folders_busy_lock.lock().await;
         let mut tasks = Vec::new();
         {
-            let folders = self.folders.as_ref().read().await;
+            let folders = self.folders.read().await;
             for folder in folders.iter() {
                 let folder = folder.clone();
                 let task = async move {
@@ -267,31 +267,31 @@ impl App {
         Some(())
     }
 
-    pub fn get_folders_busy_lock(&self) -> &Arc<Mutex<()>> {
+    pub fn get_folders_busy_lock(&self) -> &Mutex<()> {
         &self.folders_busy_lock
     }
 
-    pub fn get_folders(&self) -> &Arc<RwLock<Vec<Arc<AppFolder>>>> {
+    pub fn get_folders(&self) -> &RwLock<Vec<Arc<AppFolder>>> {
         &self.folders
     }
 
-    pub fn get_selected_folder_index(&self) -> &Arc<RwLock<Option<usize>>> {
+    pub fn get_selected_folder_index(&self) -> &RwLock<Option<usize>> {
         &self.selected_folder_index 
     }
 
-    pub fn get_series(&self) -> &Arc<RwLock<Option<Vec<Series>>>> {
+    pub fn get_series(&self) -> &RwLock<Option<Vec<Series>>> {
         &self.series
     }
 
-    pub fn get_selected_series_index(&self) -> &Arc<RwLock<Option<usize>>> {
+    pub fn get_selected_series_index(&self) -> &RwLock<Option<usize>> {
         &self.selected_series_index
     }
 
-    pub fn get_series_busy_lock(&self) -> &Arc<Mutex<()>> {
+    pub fn get_series_busy_lock(&self) -> &Mutex<()> {
         &self.series_busy_lock
     }
 
-    pub fn get_errors(&self) -> &Arc<RwLock<Vec<String>>> {
+    pub fn get_errors(&self) -> &RwLock<Vec<String>> {
         &self.errors
     }
 }

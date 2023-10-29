@@ -212,9 +212,9 @@ impl LoginSession {
         }
 
         if let Some(links) = page_1.links {
-            let next_page = links.next.unwrap_or(0);
+            let next_page = links.next.unwrap_or(1);
             let last_page = links.last.unwrap_or(0);
-            let tasks: Vec<_> = (next_page..last_page)
+            let tasks: Vec<_> = (next_page..=last_page)
                 .map(|page| self.get_episodes_page(id, page))
                 .collect();
 
