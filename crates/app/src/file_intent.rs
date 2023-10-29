@@ -1,4 +1,4 @@
-use crate::app_folder_cache::{EpisodeKey, AppFolderCache};
+use crate::tvdb_cache::{EpisodeKey, TvdbCache};
 use crate::file_descriptor::{get_descriptor, clean_episode_title, clean_series_name};
 use enum_map;
 use std::path::Path;
@@ -51,7 +51,7 @@ pub struct FilterRules {
     pub whitelist_tags: Vec<String>,
 }
 
-pub fn get_file_intent(path_str: &str, rules: &FilterRules, cache: &AppFolderCache) -> FileIntent {
+pub fn get_file_intent(path_str: &str, rules: &FilterRules, cache: &TvdbCache) -> FileIntent {
     let mut intent = FileIntent {
         action: Action::Ignore,
         dest: "".to_string(),

@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-anyhow = "1.0.75"
 app = { version = "0.1.0", path = "../../crates/app" }
 futures = "0.3.28"
 reqwest = "0.11.22"

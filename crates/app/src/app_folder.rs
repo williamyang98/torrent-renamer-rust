@@ -1,19 +1,23 @@
 use async_recursion;
-use futures;
-use std::collections::{HashMap,HashSet};
-use serde_json;
-use std::sync::Arc;
-use std::fmt;
-use tvdb::models::{Episode, Series};
-use tvdb::api::LoginSession;
-use walkdir;
-use std::path;
-use tokio;
-use tokio::sync::{Mutex, RwLock, RwLockReadGuard, RwLockWriteGuard};
 use enum_map;
-use crate::app_folder_cache::{EpisodeKey, AppFolderCache};
-use crate::file_intent::{FilterRules, Action, get_file_intent};
+use futures;
+use serde_json;
+use std::path;
+use std::sync::Arc;
+use tokio::sync::{Mutex, RwLock};
+use tokio;
+use tvdb::api::LoginSession;
+use tvdb::models::{Episode, Series};
+use walkdir;
+use crate::app_file::{
+    AppFile, FileChange, 
+    AppFileMutableContext, AppFileImmutableContext, 
+    FileTracker, 
+    flush_file_changes_acquired,
+};
 use crate::bookmarks::{BookmarkTable, deserialize_bookmarks, serialize_bookmarks};
+use crate::file_intent::{FilterRules, Action, get_file_intent};
+use crate::tvdb_cache::{EpisodeKey, TvdbCache};
 
 const PATH_STR_BOOKMARKS: &str = "bookmarks.json";
 const PATH_STR_EPISODES_DATA: &str = "episodes.json";
@@ -48,40 +52,6 @@ impl FolderStatus {
     }
 }
 
-pub struct FileTracker {
-    pending_writes: HashMap<String, HashSet<usize>>,
-    existing_sources: HashMap<String, usize>,
-    action_count: enum_map::EnumMap<Action, usize>,
-}
-
-pub struct AppFile {
-    src: String,
-    src_descriptor: Option<EpisodeKey>,
-    action: Action,
-    dest: String,
-    is_enabled: bool,
-}
-
-pub struct AppFileImmutableContext<'a> {
-    file_list: RwLockReadGuard<'a, Vec<AppFile>>,
-    file_tracker: RwLockReadGuard<'a, FileTracker>,
-}
-
-// We queue all our changes to our files so we can iterate over them while submitting changes
-// We iterate over an immutable reference to the files while submitting to a mutable queue
-// Then we take a mutable reference to the file and queue and perform the changes
-enum AppFileChange {
-    SetAction(usize, Action),
-    IsEnabled(usize, bool),
-    Destination(usize, String),
-}
-
-pub struct AppFileMutableContext<'a> {
-    file_list: RwLockReadGuard<'a, Vec<AppFile>>,
-    file_tracker: RwLockReadGuard<'a, FileTracker>,
-    change_queue: RwLockWriteGuard<'a, Vec<AppFileChange>>,
-}
-
 pub struct AppFolder {
     folder_path: String,
     folder_name: String,
@@ -90,11 +60,11 @@ pub struct AppFolder {
     episodes_path: String,
 
     filter_rules: Arc<FilterRules>,
-    cache: RwLock<Option<AppFolderCache>>,
+    cache: RwLock<Option<TvdbCache>>,
 
     file_list: RwLock<Vec<AppFile>>,
     file_tracker: RwLock<FileTracker>,
-    change_queue: RwLock<Vec<AppFileChange>>,
+    change_queue: RwLock<Vec<FileChange>>,
 
     bookmarks: RwLock<BookmarkTable>,
 
@@ -103,70 +73,6 @@ pub struct AppFolder {
     selected_descriptor: RwLock<Option<EpisodeKey>>,
     is_initial_load: Mutex<bool>,
     is_file_count_init: Mutex<bool>,
-}
-
-impl FileTracker {
-    fn new() -> Self {
-        Self {
-            pending_writes: HashMap::new(),
-            existing_sources: HashMap::new(),
-            action_count: enum_map::enum_map!{ _ => 0 },
-        }
-    }
-
-    fn clear(&mut self) {
-        self.pending_writes.clear();
-        self.existing_sources.clear();
-        self.action_count.clear();
-    }
-
-    fn insert_existing_source(&mut self, src: &str, index: usize) {
-        self.existing_sources.insert(src.to_string(), index);
-    }
-
-    fn add_pending_write(&mut self, dest: &str, index: usize) {
-        let entries = match self.pending_writes.get_mut(dest) {
-            Some(entries) => entries,
-            None => self.pending_writes.entry(dest.to_string()).or_insert(HashSet::new()),
-        };
-        entries.insert(index);
-    }
-
-    fn remove_pending_write(&mut self, dest: &str, index: usize) {
-        let entries = match self.pending_writes.get_mut(dest) {
-            Some(entries) => entries,
-            None => self.pending_writes.entry(dest.to_string()).or_insert(HashSet::new()),
-        };
-        entries.remove(&index);
-    }
-
-    fn check_if_write_conflicts(&self, dest: &str) -> bool {
-        let mut total_files = 0;
-        if self.existing_sources.get(dest).is_some() {
-            total_files += 1;
-        }
-        // NOTE: Exit early to avoid extra table lookup
-        if total_files > 1 {
-            return true;
-        }
-        if let Some(entries) = self.pending_writes.get(dest) {
-            total_files += entries.len();
-        } 
-
-        total_files > 1
-    }
-
-    pub fn get_pending_writes(&self) -> &HashMap<String, HashSet<usize>> {
-        &self.pending_writes
-    }
-
-    pub fn get_source_index(&self, src: &str) -> Option<&usize> {
-        self.existing_sources.get(src)
-    }
-
-    pub fn get_action_count(&self) -> &enum_map::EnumMap<Action, usize> {
-        &self.action_count
-    }
 }
 
 impl AppFolder {
@@ -206,7 +112,7 @@ impl AppFolder {
 }
 
 #[async_recursion::async_recursion]
-async fn recursive_search_file_intents(root_path: &str, curr_folder: &str, cache: &AppFolderCache, intents: &mut Vec<AppFile>, rules: &FilterRules) -> Result<(), std::io::Error> {
+async fn recursive_search_file_intents(root_path: &str, curr_folder: &str, cache: &TvdbCache, intents: &mut Vec<AppFile>, rules: &FilterRules) -> Result<(), std::io::Error> {
     let mut entries = tokio::fs::read_dir(curr_folder).await?;
     while let Some(entry) = entries.next_entry().await? {
         let file_type = entry.file_type().await?;
@@ -294,7 +200,7 @@ impl AppFolder {
 
         FolderStatus::Done
     }
-
+    
     pub async fn load_bookmarks_from_file(&self) -> Option<()> {
         let bookmarks_data = tokio::fs::read_to_string(self.bookmarks_path.as_str()).await;
         if let Err(err) = bookmarks_data.as_ref() {
@@ -338,10 +244,6 @@ impl AppFolder {
             return None;
         };
         Some(())
-    }
-
-    pub fn get_bookmarks(&self) -> &RwLock<BookmarkTable> {
-        &self.bookmarks
     }
 
     pub async fn update_file_intents(&self) -> Option<()> {
@@ -404,10 +306,6 @@ impl AppFolder {
         Some(())
     }
 
-    pub fn is_cache_loaded(&self) -> bool {
-        self.cache.blocking_read().is_some()
-    }
-
     pub async fn load_cache_from_file(&self) -> Option<()> {
         let _busy_lock = self.busy_lock.lock().await;
 
@@ -448,7 +346,7 @@ impl AppFolder {
         };
 
         let mut cache = self.cache.write().await;
-        *cache = Some(AppFolderCache::new(series, episodes));
+        *cache = Some(TvdbCache::new(series, episodes));
         Some(())
     }
 
@@ -479,7 +377,7 @@ impl AppFolder {
         };
 
         let mut cache = self.cache.write().await;
-        *cache = Some(AppFolderCache::new(series, episodes));
+        *cache = Some(TvdbCache::new(series, episodes));
         Some(())
     }
 
@@ -633,7 +531,8 @@ impl AppFolder {
             };
         }
     }
-
+    
+    // getters
     pub fn get_folder_path(&self) -> &str {
         self.folder_path.as_str() 
     }
@@ -658,8 +557,12 @@ impl AppFolder {
         &self.selected_descriptor
     }
 
-    pub fn get_cache(&self) -> &RwLock<Option<AppFolderCache>> {
+    pub fn get_cache(&self) -> &RwLock<Option<TvdbCache>> {
         &self.cache
+    }
+
+    pub fn get_bookmarks(&self) -> &RwLock<BookmarkTable> {
+        &self.bookmarks
     }
 
     pub async fn get_files(&self) -> AppFileImmutableContext {
@@ -719,229 +622,3 @@ impl AppFolder {
     }
 }
 
-impl AppFile {
-    pub fn new(src: &str, src_descriptor: Option<EpisodeKey>, action: Action, dest: &str) -> Self {
-        Self {
-            src: src.to_string(),
-            src_descriptor,
-            action,
-            dest: dest.to_string(),
-            is_enabled: false,
-        }
-    }
-}
-
-pub trait AppFileContextGetter {
-    fn get_src(&self, index: usize) -> &str;
-    fn get_src_descriptor(&self, index: usize) -> &Option<EpisodeKey>;
-    fn get_action(&self, index: usize) -> Action;
-    fn get_dest(&self, index: usize) -> &str;
-    fn get_is_enabled(&self, index: usize) -> bool;
-    fn get_is_conflict(&self, index: usize) -> bool;
-}
-
-pub trait AppFileContextSetter {
-    fn set_action(&mut self, new_action: Action, index: usize);
-    fn set_is_enabled(&mut self, new_is_enabled: bool, index: usize);
-    fn set_dest(&mut self, new_dest: String, index: usize); 
-}
-
-pub struct AppFileContextFormatter<'a, T> 
-where T: AppFileContextGetter 
-{
-    index: usize,
-    context: &'a T,
-}
-
-impl<'a, T> fmt::Debug for AppFileContextFormatter<'a, T> 
-where T: AppFileContextGetter 
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AppFileContext")
-            .field("src", &self.context.get_src(self.index))
-            .field("src_descriptor", &self.context.get_src_descriptor(self.index))
-            .field("action", &self.context.get_action(self.index))
-            .field("dest", &self.context.get_dest(self.index))
-            .field("is_enabled", &self.context.get_is_enabled(self.index))
-            .field("is_conflict", &self.context.get_is_conflict(self.index))
-            .finish()
-    }
-}
-
-macro_rules! generate_app_file_context_getters {
-    ($name: ident) => {
-        impl AppFileContextGetter for $name<'_> {
-            fn get_src(&self, index: usize) -> &str {
-                self.file_list[index].src.as_str() 
-            }
-
-            fn get_src_descriptor(&self, index: usize) -> &Option<EpisodeKey> {
-                &self.file_list[index].src_descriptor
-            }
-
-            fn get_action(&self, index: usize) -> Action {
-                self.file_list[index].action
-            }
-
-            fn get_dest(&self, index: usize) -> &str {
-                self.file_list[index].dest.as_str()
-            }
-
-            fn get_is_enabled(&self, index: usize) -> bool {
-                self.file_list[index].is_enabled
-            }
-
-            fn get_is_conflict(&self, index: usize) -> bool {
-                let file = &self.file_list[index];
-                if !file.is_enabled || file.action != Action::Rename {
-                    return false;
-                }
-                self.file_tracker.check_if_write_conflicts(file.dest.as_str())
-            }
-        }
-
-        impl $name<'_> {
-            pub fn get_total_items(&self) -> usize {
-                self.file_list.len()
-            }
-
-            pub fn is_empty(&self) -> bool {
-                self.file_list.len() == 0
-            }
-
-            pub fn get_formatter(&self, index: usize) -> AppFileContextFormatter<$name<'_>> {
-                AppFileContextFormatter {
-                    index,
-                    context: self,
-                }
-            }
-        }
-    }
-}
-
-generate_app_file_context_getters!(AppFileMutableContext);
-generate_app_file_context_getters!(AppFileImmutableContext);
-
-impl AppFileMutableContext<'_> {
-    pub fn set_action(&mut self, new_action: Action, index: usize) {
-        self.change_queue.push(AppFileChange::SetAction(index, new_action));
-        let file = &self.file_list[index];
-        // Automatically set destination to src is not set
-        if file.action != Action::Rename && new_action == Action::Rename && file.dest.is_empty() {
-            self.change_queue.push(AppFileChange::Destination(index, file.src.to_owned())); 
-        }
-        // Automatically disable enabled if we are deleting it
-        if new_action == Action::Delete {
-            self.change_queue.push(AppFileChange::IsEnabled(index, false));
-        }
-    }
-
-    pub fn set_is_enabled(&mut self, new_is_enabled: bool, index: usize) {
-        let change = AppFileChange::IsEnabled(index, new_is_enabled);
-        self.change_queue.push(change);
-    }
-
-    pub fn set_dest(&mut self, new_dest: String, index: usize) {
-        let change = AppFileChange::Destination(index, new_dest);
-        self.change_queue.push(change);
-    }
-}
-
-fn flush_file_changes_acquired(
-    mut file_list: RwLockWriteGuard<'_, Vec<AppFile>>,  
-    mut file_tracker: RwLockWriteGuard<'_, FileTracker>,
-    mut change_queue: RwLockWriteGuard<'_, Vec<AppFileChange>>,
-) -> usize {
-    let mut total_changes: usize = 0;
-    for file_change in change_queue.iter() {
-        match file_change {
-            AppFileChange::SetAction(index, new_action) => {
-                let index = *index;
-                let new_action = *new_action;
-                let file = match file_list.get_mut(index) {
-                    Some(file) => file,
-                    None => continue,
-                };
-
-                let old_action = file.action;
-                file.action = new_action;
-
-                if old_action == new_action {
-                    continue;
-                }
-
-                file_tracker.action_count[old_action] -= 1usize;
-                file_tracker.action_count[new_action] += 1usize;
-
-                if !file.is_enabled {
-                    continue;
-                };
-
-                if old_action != Action::Rename && new_action != Action::Rename {
-                    continue;
-                }
-
-                if old_action == Action::Rename {
-                    file_tracker.remove_pending_write(file.dest.as_str(), index);
-                } else {
-                    file_tracker.add_pending_write(file.dest.as_str(), index);
-                };
-                total_changes += 1;
-            },
-            AppFileChange::IsEnabled(index, new_is_enabled) => {
-                let index = *index;
-                let new_is_enabled = *new_is_enabled;
-                let file = match file_list.get_mut(index) {
-                    Some(file) => file,
-                    None => continue,
-                };
-
-                let old_is_enabled = file.is_enabled;
-                file.is_enabled = new_is_enabled;
-
-                if old_is_enabled == new_is_enabled {
-                    continue;
-                }
-
-                if file.action != Action::Rename {
-                    continue;
-                }
-
-                if new_is_enabled {
-                    file_tracker.add_pending_write(file.dest.as_str(), index);
-                } else {
-                    file_tracker.remove_pending_write(file.dest.as_str(), index);
-                };
-                total_changes += 1;
-            },
-            AppFileChange::Destination(index, new_dest) => {
-                let index = *index;
-                let file = match file_list.get_mut(index) {
-                    Some(file) => file,
-                    None => continue,
-                };
-
-                if file.dest.as_str() == new_dest {
-                    continue
-                }
-
-                // We perform a .clear() and .push_str(...) to avoid a short lived clone
-                if !file.is_enabled || file.action != Action::Rename {
-                    file.dest.clear();
-                    file.dest.push_str(new_dest.as_str());
-                    continue
-                }
-
-                file_tracker.remove_pending_write(file.dest.as_str(), index);
-                file_tracker.add_pending_write(new_dest.as_str(), index);
-
-                file.dest.clear();
-                file.dest.push_str(new_dest.as_str());
-                total_changes += 1;
-            },
-        }
-    }
-
-    change_queue.clear();
-    total_changes
-}

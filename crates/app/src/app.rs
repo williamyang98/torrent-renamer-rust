@@ -267,7 +267,9 @@ impl App {
             for folder in folders.iter() {
                 let folder = folder.clone();
                 let task = async move {
-                    if folder.perform_initial_load().await == None {
+                    let res = folder.perform_initial_load().await;
+                    // Initial load already occured, we therefore just rescan the folder
+                    if res.is_none() {
                         folder.update_file_intents().await;
                     }
                 };

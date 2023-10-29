@@ -7,13 +7,13 @@ pub struct EpisodeKey {
     pub episode: u32,
 }
 
-pub struct AppFolderCache {
+pub struct TvdbCache {
     pub series: Series,
     pub episodes: Vec<Episode>,
     pub episode_cache: HashMap<EpisodeKey, usize>,
 }
 
-impl AppFolderCache {
+impl TvdbCache {
     pub fn new(series: Series, mut episodes: Vec<Episode>) -> Self {
         // Sort so that our search results are sorted
         episodes.sort_unstable_by(|a,b| {
