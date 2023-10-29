@@ -55,7 +55,7 @@ fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus, is_busy: bool) 
 }
 
 pub fn render_folders_list(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, 
+    ui: &mut egui::Ui,
     gui: &mut GuiAppFoldersList, app: &Arc<App>,
 ) {
     let folders = app.get_folders().blocking_read();
@@ -74,7 +74,7 @@ pub fn render_folders_list(
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!is_busy, |ui| {
             if ui.button("Refresh all").clicked() {
-                runtime.spawn({
+                tokio::spawn({
                     let app = app.clone();
                     async move {
                         app.update_file_intents_for_all_folders().await
@@ -82,7 +82,7 @@ pub fn render_folders_list(
                 });
             }
             if ui.button("Reload structure").clicked() {
-                runtime.spawn({
+                tokio::spawn({
                     let app = app.clone();
                     async move {
                         app.load_folders_from_existing_root_path().await
@@ -92,7 +92,7 @@ pub fn render_folders_list(
         });
 
         if ui.button("Login").clicked() {
-            runtime.spawn({
+            tokio::spawn({
                 let app = app.clone();
                 async move {
                     app.login().await
@@ -191,7 +191,7 @@ pub fn render_folders_list(
                         }
                         res.context_menu(|ui| {
                             if ui.button("Open folder").clicked() {
-                                runtime.spawn({
+                                tokio::spawn({
                                     let folder_path_str = folder.get_folder_path().to_string();
                                     async move {
                                         cross_open::that(folder_path_str)

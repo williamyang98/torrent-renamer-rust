@@ -2,6 +2,7 @@ use app::app::App;
 use std::sync::Arc;
 use eframe;
 use egui;
+use tokio;
 use crate::app_folders_list::GuiAppFoldersList;
 use crate::app_folder::GuiAppFolder;
 use crate::app_series_search::GuiSeriesSearch;
@@ -13,7 +14,6 @@ use crate::app_series_search::render_series_search;
 
 pub struct GuiApp {
     pub(crate) app: Arc<App>,
-    pub(crate) runtime: tokio::runtime::Runtime,
 
     pub(crate) is_folder_busy_check_thread_spawned: bool,
 
@@ -23,10 +23,9 @@ pub struct GuiApp {
 }
 
 impl GuiApp {
-    pub fn new(app: Arc<App>, runtime: tokio::runtime::Runtime) -> Self {
+    pub fn new(app: Arc<App>) -> Self {
         Self {
             app,
-            runtime,
 
             is_folder_busy_check_thread_spawned: false,
 
@@ -44,7 +43,7 @@ impl eframe::App for GuiApp {
             self.is_folder_busy_check_thread_spawned = true;
             let ctx = ctx.clone();
             let app = self.app.clone();
-            self.runtime.spawn(async move {
+            tokio::spawn(async move {
                 let mut old_busy_count = None;
                 loop {
                     let folders = app.get_folders().read().await;
@@ -83,7 +82,7 @@ impl eframe::App for GuiApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none())
                     .show_inside(ui, |ui| {
-                        render_folders_list(ui, &self.runtime, &mut self.gui_app_folders_list, &self.app);
+                        render_folders_list(ui, &mut self.gui_app_folders_list, &self.app);
                     });
             });
 
@@ -103,7 +102,7 @@ impl eframe::App for GuiApp {
                 drop(folders);
 
                 let session = self.app.get_login_session().blocking_read();
-                render_app_folder(ui, &self.runtime, session.as_ref(), &mut self.gui_app_folder, &folder);
+                render_app_folder(ui, session.as_ref(), &mut self.gui_app_folder, &folder);
             });
 
         let mut is_open = self.gui_app_folder.is_show_series_search;
@@ -112,7 +111,7 @@ impl eframe::App for GuiApp {
             .vscroll(false)
             .open(&mut is_open)
             .show(ctx, |ui| {
-                render_series_search(ui, &self.runtime, &mut self.gui_series_search, &self.app);
+                render_series_search(ui, &mut self.gui_series_search, &self.app);
             });
         self.gui_app_folder.is_show_series_search = is_open;
     }

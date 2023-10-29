@@ -30,7 +30,7 @@ impl Default for GuiSeriesSearch {
 }
 
 fn render_series_search_list(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime,
+    ui: &mut egui::Ui,
     gui: &mut GuiSeriesSearch, app: &Arc<App>,
 ) {
     if app.get_series_busy_lock().try_lock().is_err() {
@@ -106,7 +106,7 @@ fn render_series_search_list(
                             });
                             row.col(|ui| {
                                 if ui.button("Select").clicked() {
-                                    runtime.spawn({
+                                    tokio::spawn({
                                         let entry_id = entry.id;
                                         let app = app.clone();
                                         async move {
@@ -158,7 +158,7 @@ fn render_series_search_info_panel(
 }
 
 fn render_series_search_bar(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, 
+    ui: &mut egui::Ui, 
     gui: &mut GuiSeriesSearch, app: &Arc<App>,
 ) {
     let is_not_busy = app.get_series_busy_lock().try_lock().is_ok();
@@ -188,7 +188,7 @@ fn render_series_search_bar(
 
             let is_entered = line_res.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if is_pressed || is_entered {
-                runtime.spawn({
+                tokio::spawn({
                     let series_search = gui.search_string.clone();
                     let app = app.clone();
                     async move {
@@ -201,7 +201,7 @@ fn render_series_search_bar(
 }
 
 pub fn render_series_search(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, 
+    ui: &mut egui::Ui, 
     gui: &mut GuiSeriesSearch, app: &Arc<App>,
 ) {
     let series = app.get_series().blocking_read();
@@ -215,9 +215,9 @@ pub fn render_series_search(
 
     egui::CentralPanel::default()
         .show_inside(ui, |ui| {
-            render_series_search_bar(ui, runtime, gui, app);
+            render_series_search_bar(ui, gui, app);
             ui.separator();
-            render_series_search_list(ui, runtime, gui, app);
+            render_series_search_list(ui, gui, app);
         });
 }
 

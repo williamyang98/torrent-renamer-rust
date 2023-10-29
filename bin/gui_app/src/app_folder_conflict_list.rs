@@ -3,12 +3,11 @@ use app::file_intent::Action;
 use app::app_folder::AppFolder;
 use egui;
 use egui_extras::{TableBuilder, Column};
-use tokio;
 use crate::clipped_selectable::ClippedSelectableLabel;
 use crate::app_file_actions::{check_file_shortcuts, render_file_context_menu};
 
 pub fn render_files_conflicts_list(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, 
+    ui: &mut egui::Ui, 
     folder: &Arc<AppFolder>,
 ) {
     let file_tracker = folder.get_file_tracker().blocking_read();
@@ -103,7 +102,7 @@ pub fn render_files_conflicts_list(
                                     check_file_shortcuts(ui, &mut files, index);
                                 }
                                 res.context_menu(|ui| {
-                                    render_file_context_menu(ui, runtime, folder.get_folder_path(), &mut files, index, is_not_busy);
+                                    render_file_context_menu(ui, folder.get_folder_path(), &mut files, index, is_not_busy);
                                 });
                                 current_column_widths[1] = ui.available_width();
                             });

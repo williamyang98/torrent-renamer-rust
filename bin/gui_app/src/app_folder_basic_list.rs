@@ -9,7 +9,7 @@ use crate::app_file_actions::{check_file_shortcuts, render_file_context_menu};
 use crate::app_bookmarks::render_file_bookmarks;
 
 pub fn render_files_basic_list(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, 
+    ui: &mut egui::Ui, 
     searcher: &mut FuzzySearcher, selected_action: Action, folder: &Arc<AppFolder>,
 ) {
     let file_tracker = folder.get_file_tracker().blocking_read();
@@ -63,7 +63,7 @@ pub fn render_files_basic_list(
                             check_file_shortcuts(ui, &mut files, index);
                         }
                         res.context_menu(|ui| {
-                            render_file_context_menu(ui, runtime, folder.get_folder_path(), &mut files, index, is_not_busy);
+                            render_file_context_menu(ui, folder.get_folder_path(), &mut files, index, is_not_busy);
                         });
                     });
                 });
@@ -72,7 +72,7 @@ pub fn render_files_basic_list(
     });
 
     if is_bookmarks_changed {
-        runtime.spawn({
+        tokio::spawn({
             let folder = folder.clone();
             async move {
                 folder.save_bookmarks_to_file().await

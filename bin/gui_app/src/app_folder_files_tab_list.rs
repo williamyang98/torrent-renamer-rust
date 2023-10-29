@@ -66,7 +66,7 @@ fn render_files_tab_bar(ui: &mut egui::Ui, selected_tab: &mut FileTab, folder: &
 }
 
 pub fn render_files_tab_list(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime,
+    ui: &mut egui::Ui,
     selected_tab: &mut FileTab, searcher: &mut FuzzySearcher, folder: &Arc<AppFolder>,
 ) {
     render_files_tab_bar(ui, selected_tab, folder);
@@ -80,13 +80,13 @@ pub fn render_files_tab_list(
     ui.push_id(id, |ui| {
         match selected_tab {
             FileTab::FileAction(action) => match action {
-                Action::Rename => render_files_rename_list(ui, runtime, searcher, folder),
-                Action::Delete => render_files_delete_list(ui, runtime, searcher, folder),
-                _ => render_files_basic_list(ui, runtime, searcher, *action, folder),
+                Action::Rename => render_files_rename_list(ui, searcher, folder),
+                Action::Delete => render_files_delete_list(ui, searcher, folder),
+                _ => render_files_basic_list(ui, searcher, *action, folder),
             },
             FileTab::Conflicts => {
                 egui::ScrollArea::vertical().show(ui, |ui| {
-                    render_files_conflicts_list(ui, runtime, folder);
+                    render_files_conflicts_list(ui, folder);
                 });
             },
         };

@@ -35,7 +35,7 @@ impl Default for GuiAppFolder {
 }
 
 fn render_folder_controls(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, session: Option<&Arc<LoginSession>>,
+    ui: &mut egui::Ui, session: Option<&Arc<LoginSession>>,
     gui: &mut GuiAppFolder, folder: &Arc<AppFolder>,
 ) {
     let is_cache_loaded = folder.get_cache().blocking_read().is_some();
@@ -44,7 +44,7 @@ fn render_folder_controls(
             let res = ui.button("Update file intents");
             if res.clicked() {
                 let folder = folder.clone();
-                runtime.spawn(async move {
+                tokio::spawn(async move {
                     folder.update_file_intents().await
                 });
             }
@@ -55,7 +55,7 @@ fn render_folder_controls(
 
         if ui.button("Load cache from file").clicked() {
             let folder = folder.clone();
-            runtime.spawn(async move {
+            tokio::spawn(async move {
                 folder.load_cache_from_file().await
             });
         };
@@ -66,7 +66,7 @@ fn render_folder_controls(
             let res = ui.button("Refresh cache from api");
             if res.clicked() {
                 if let Some(session) = session {
-                    runtime.spawn({
+                    tokio::spawn({
                         let folder = folder.clone();
                         let session = session.clone();
                         async move {
@@ -86,7 +86,7 @@ fn render_folder_controls(
 
         if ui.button("Execute changes").clicked() {
             let folder = folder.clone();
-            runtime.spawn(async move {
+            tokio::spawn(async move {
                 folder.execute_file_changes().await;
                 folder.update_file_intents().await
             });
@@ -153,12 +153,12 @@ fn render_folder_info(ui: &mut egui::Ui, folder: &Arc<AppFolder>) {
 }
 
 pub fn render_app_folder(
-    ui: &mut egui::Ui, runtime: &tokio::runtime::Runtime, session: Option<&Arc<LoginSession>>,
+    ui: &mut egui::Ui, session: Option<&Arc<LoginSession>>,
     gui: &mut GuiAppFolder, folder: &Arc<AppFolder>,
 ) {
     let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
 
-    runtime.spawn({
+    tokio::spawn({
         let folder = folder.clone();
         async move {
             folder.perform_initial_load().await
@@ -169,7 +169,7 @@ pub fn render_app_folder(
         .resizable(false)
         .show_inside(ui, |ui| {
             ui.add_enabled_ui(is_not_busy, |ui| {
-                render_folder_controls(ui, runtime, session, gui, folder);
+                render_folder_controls(ui, session, gui, folder);
             });
         });
     
@@ -205,7 +205,7 @@ pub fn render_app_folder(
                     ui.push_id(id, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             if !gui.is_show_episode_cache {
-                                render_files_tab_list(ui, runtime, &mut gui.selected_tab, &mut gui.searcher, folder);
+                                render_files_tab_list(ui, &mut gui.selected_tab, &mut gui.searcher, folder);
                             } else {
                                 render_episode_cache_list(ui, &mut gui.searcher, folder);
                             }
