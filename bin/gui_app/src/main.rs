@@ -772,20 +772,27 @@ fn render_files_list(gui: &mut GuiApp, ui: &mut egui::Ui, folder: &Arc<AppFolder
     {
         render_files_tab_bar(gui, ui, folder);
         ui.separator();
-        match gui.selected_tab {
-            FileTab::FileAction(action) => match action {
-                Action::Rename => render_files_rename_list(gui, ui, folder),
-                Action::Delete => render_files_delete_list(gui, ui, folder),
-                _ => render_files_basic_list(gui, ui, action, folder),
-            },
-            FileTab::Conflicts => {
-                ui.push_id("conflicts_list", |ui| {
+        
+        let id = match gui.selected_tab {
+            FileTab::FileAction(action) => format!("file_list_{}", action.to_str().to_lowercase()),
+            FileTab::Conflicts => "file_list_conflicts".to_string(),
+        };
+        
+        ui.push_id(id, |ui| {
+            match gui.selected_tab {
+                FileTab::FileAction(action) => match action {
+                    Action::Rename => render_files_rename_list(gui, ui, folder),
+                    Action::Delete => render_files_delete_list(gui, ui, folder),
+                    _ => render_files_basic_list(gui, ui, action, folder),
+                },
+                FileTab::Conflicts => {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         render_files_conflicts_list(gui, ui, folder);
                     });
-                });
-            },
-        };
+                },
+            };
+        });
+
     }
     
     folder.flush_file_changes_blocking();
@@ -948,7 +955,11 @@ fn render_folder_panel(gui: &mut GuiApp, ui: &mut egui::Ui) {
 
             egui::CentralPanel::default()
                 .show_inside(ui, |ui| {
-                    ui.push_id("folder_files_list", |ui| {
+                    let id = match gui.show_episode_cache_search {
+                        false => "folder_file_list",
+                        true => "folder_episode_cache",
+                    };
+                    ui.push_id(id, |ui| {
                         egui::ScrollArea::vertical().show(ui, |ui| {
                             if !gui.show_episode_cache_search {
                                 render_files_list(gui, ui, &folder);
@@ -973,11 +984,18 @@ lazy_static! {
 fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus, is_busy: bool) {
     let height = ui.text_style_height(&egui::TextStyle::Monospace);
     let size = egui::vec2(height, height);
-    let icon = match is_busy {
-        false => FOLDER_STATUS_ICONS[status].clone().size(height),
-        true => egui::RichText::new("↻").strong().size(height),
-    };
-    ui.add_sized(size, egui::Label::new(icon));
+    if !is_busy {
+        let icon = FOLDER_STATUS_ICONS[status].clone().size(height);
+        let elem = egui::Label::new(icon);
+        ui.add_sized(size, elem);
+    } else {
+        // let icon = egui::RichText::new("↻").strong().size(height);
+        // let elem = egui::Label::new(icon);
+        // The spinner forces a ui refresh which could be unnecessarily expensive
+        // But it looks cool so I'm keeping it
+        let elem = egui::Spinner::new();
+        ui.add_sized(size, elem);
+    }
 }
 
 fn render_invisible_width_widget(ui: &mut egui::Ui) {
