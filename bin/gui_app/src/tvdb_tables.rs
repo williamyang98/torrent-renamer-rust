@@ -1,5 +1,8 @@
 use egui;
 use tvdb::models::{Series, Episode};
+use open as cross_open;
+
+const IMDB_PREFIX: &'static str = "https://www.imdb.com/title";
 
 pub fn render_series_table(ui: &mut egui::Ui, series: &Series) {
     let layout = egui::Layout::left_to_right(egui::Align::Min)
@@ -43,6 +46,19 @@ pub fn render_series_table(ui: &mut egui::Ui, series: &Series) {
                 let gui_label = egui::Label::new(label).wrap(true);
                 ui.add(gui_label);
                 ui.end_row();
+
+                if let Some(id) = series.imdb_id.as_ref() {
+                    if !id.is_empty() {
+                        ui.strong("IMDB");
+                        let link_url = format!("{}/{}", IMDB_PREFIX, id);
+                        if ui.link(link_url.as_str()).clicked() {
+                            tokio::spawn(async move {
+                                cross_open::that(link_url)
+                            });
+                        }
+                        ui.end_row();
+                    }
+                }
             });
     });
 }
@@ -78,6 +94,19 @@ pub fn render_episode_table(ui: &mut egui::Ui, episode: &Episode) {
                 let gui_label = egui::Label::new(label).wrap(true);
                 ui.add(gui_label);
                 ui.end_row();
+
+                if let Some(id) = episode.imdb_id.as_ref() {
+                    if !id.is_empty() {
+                        ui.strong("IMDB");
+                        let link_url = format!("{}/{}", IMDB_PREFIX, id);
+                        if ui.link(link_url.as_str()).clicked() {
+                            tokio::spawn(async move {
+                                cross_open::that(link_url)
+                            });
+                        }
+                        ui.end_row();
+                    }
+                }
             });
     });
 }
