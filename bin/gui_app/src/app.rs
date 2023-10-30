@@ -3,41 +3,42 @@ use std::sync::Arc;
 use eframe;
 use egui;
 use tokio;
-use crate::app_folders_list::GuiAppFoldersList;
-use crate::app_folder::GuiAppFolder;
-use crate::app_series_search::GuiSeriesSearch;
 use crate::helpers::render_invisible_width_widget;
 use crate::error_list::render_errors_list;
-use crate::app_folders_list::render_folders_list;
-use crate::app_folder::render_app_folder;
-use crate::app_series_search::render_series_search;
+use crate::settings_menu::{GuiSettings, render_settings_menu};
+use crate::app_folders_list::{GuiAppFoldersList, render_folders_list};
+use crate::app_folder::{GuiAppFolder, render_app_folder};
+use crate::app_series_search::{GuiSeriesSearch, render_series_search};
 
 pub struct GuiApp {
     pub(crate) app: Arc<App>,
-
-    pub(crate) is_folder_busy_check_thread_spawned: bool,
-
     pub(crate) gui_app_folders_list: GuiAppFoldersList,
     pub(crate) gui_app_folder: GuiAppFolder,
     pub(crate) gui_series_search: GuiSeriesSearch,
+    gui_settings: GuiSettings,
+
+    is_folder_busy_check_thread_spawned: bool,
+    is_gui_settings_opened: bool,
 }
 
 impl GuiApp {
     pub fn new(app: Arc<App>) -> Self {
         Self {
             app,
-
-            is_folder_busy_check_thread_spawned: false,
-
             gui_app_folders_list: GuiAppFoldersList::new(),
             gui_app_folder: GuiAppFolder::new(),
             gui_series_search: GuiSeriesSearch::new(),
+            gui_settings: GuiSettings::new(),
+            is_folder_busy_check_thread_spawned: false,
+            is_gui_settings_opened: false,
         }
     }
 }
 
 impl eframe::App for GuiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
+        self.gui_settings.update_frame(ctx, frame);
+
         // Create a thread that refreshes ui when folders are updated
         if !self.is_folder_busy_check_thread_spawned {
             self.is_folder_busy_check_thread_spawned = true;
@@ -82,7 +83,7 @@ impl eframe::App for GuiApp {
                 egui::CentralPanel::default()
                     .frame(egui::Frame::none())
                     .show_inside(ui, |ui| {
-                        render_folders_list(ui, &mut self.gui_app_folders_list, &self.app);
+                        render_folders_list(ui, &mut self.gui_app_folders_list, &self.app, &mut self.is_gui_settings_opened);
                     });
             });
 
@@ -105,14 +106,22 @@ impl eframe::App for GuiApp {
                 render_app_folder(ui, session.as_ref(), &mut self.gui_app_folder, &folder);
             });
 
-        let mut is_open = self.gui_app_folder.is_show_series_search;
         egui::Window::new("Series Search")
             .collapsible(false)
             .vscroll(false)
-            .open(&mut is_open)
+            .open(&mut self.gui_app_folder.is_show_series_search)
             .show(ctx, |ui| {
                 render_series_search(ui, &mut self.gui_series_search, &self.app);
             });
-        self.gui_app_folder.is_show_series_search = is_open;
+        
+        egui::Window::new("Settings Menu")
+            .collapsible(false)
+            .vscroll(true)
+            .hscroll(true)
+            .open(&mut self.is_gui_settings_opened)
+            .show(ctx, |ui| {
+                render_settings_menu(ui, ctx, &mut self.gui_settings);
+            });
     }
 }
+

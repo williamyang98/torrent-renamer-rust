@@ -56,7 +56,7 @@ fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus, is_busy: bool) 
 
 pub fn render_folders_list(
     ui: &mut egui::Ui,
-    gui: &mut GuiAppFoldersList, app: &Arc<App>,
+    gui: &mut GuiAppFoldersList, app: &Arc<App>, is_show_settings: &mut bool,
 ) {
     let folders = app.get_folders().blocking_read();
     let is_busy = app.get_folders_busy_lock().try_lock().is_err();
@@ -112,6 +112,10 @@ pub fn render_folders_list(
                 ui.label("Logged out");
             }
         });
+
+        if ui.selectable_label(*is_show_settings, "⛭").clicked() {
+            *is_show_settings = !*is_show_settings;
+        }
     });
 
     if folders.is_empty() {

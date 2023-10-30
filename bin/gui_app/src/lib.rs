@@ -3,6 +3,8 @@ pub mod clipped_selectable;
 pub mod helpers;
 pub mod error_list;
 pub mod tvdb_tables;
+pub mod frame_history;
+pub mod settings_menu;
 
 pub mod app_bookmarks;
 pub mod app_file_actions;
