@@ -1,3 +1,6 @@
+// disable console when compiling in release
+#![windows_subsystem = "windows"]
+
 use app::app::App;
 use gui_app::app::GuiApp;
 use std::path::Path;
@@ -46,11 +49,7 @@ async fn main() -> Result<(), eframe::Error> {
     let default_config_path = Path::new("./res").to_string_lossy().to_string();
     let config_path = args.get(2).unwrap_or(&default_config_path);
 
-    let native_options = eframe::NativeOptions { 
-        maximized: true, 
-        ..Default::default() 
-    };
-
+    let native_options = eframe::NativeOptions::default();
     let app = App::new(config_path.as_str()).await;
     
     tokio::task::block_in_place(move || {
