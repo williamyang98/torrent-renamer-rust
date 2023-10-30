@@ -217,46 +217,6 @@ impl App {
         Some(())
     }
 
-    pub async fn set_series_to_current_folder(&self, series_id: u32) -> Option<()> {
-        let (folders_guard, selected_index_guard, session_guard) = tokio::join!(
-            self.folders.read(),
-            self.selected_folder_index.read(),
-            self.login_session.read(),
-        );
-
-        let session = match session_guard.as_ref() {
-            Some(session) => session.clone(),
-            None => {
-                let message = "Could not set update folder series from api since no login session exists";
-                self.errors.write().await.push(message.to_string());
-                return None;
-            },
-        };
-        
-        let selected_index = match *selected_index_guard {
-            Some(index) => index,
-            None => {
-                let message = "Could not set update folder series from api since no folder is selected currently";
-                self.errors.write().await.push(message.to_string());
-                return None;
-            },
-        };
-
-        let folder = &folders_guard[selected_index];
-        let folder = folder.clone();
-        drop(folders_guard);
-        drop(selected_index_guard);
-
-        folder.load_cache_from_api(session, series_id).await?;
-        drop(session_guard);
-
-        tokio::join!(
-            folder.update_file_intents(),
-            folder.save_cache_to_file(),
-        );
-        Some(())
-    }
-
     pub async fn update_file_intents_for_all_folders(&self) -> Option<()> {
         // Allow the folder to be read while it is busy
         // Disallow load_folders(...) while we are performing an update on all folders

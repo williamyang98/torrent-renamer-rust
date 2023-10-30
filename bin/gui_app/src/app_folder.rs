@@ -38,9 +38,12 @@ fn render_folder_controls(
     ui: &mut egui::Ui, session: Option<&Arc<LoginSession>>,
     gui: &mut GuiAppFolder, folder: &Arc<AppFolder>,
 ) {
+    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let is_cache_loaded = folder.get_cache().blocking_read().is_some();
+    let is_logged_in = session.is_some();
+
     ui.horizontal(|ui| {
-        ui.add_enabled_ui(is_cache_loaded, |ui| {
+        ui.add_enabled_ui(is_cache_loaded && is_not_busy, |ui| {
             let res = ui.button("Update file intents");
             if res.clicked() {
                 let folder = folder.clone();
@@ -49,20 +52,25 @@ fn render_folder_controls(
                 });
             }
             res.on_disabled_hover_ui(|ui| {
-                ui.label("Cache is unloaded");  
+                if !is_cache_loaded  { ui.label("Cache is unloaded"); } 
+                else if !is_not_busy { ui.label("Folder is busy"); }
             });
         });
 
-        if ui.button("Load cache from file").clicked() {
-            let folder = folder.clone();
-            tokio::spawn(async move {
-                folder.load_cache_from_file().await
+        ui.add_enabled_ui(is_not_busy, |ui| {
+            let res = ui.button("Load cache from file");
+            if res.clicked() {
+                let folder = folder.clone();
+                tokio::spawn(async move {
+                    folder.load_cache_from_file().await
+                });
+            };
+            res.on_disabled_hover_ui(|ui| {
+                if !is_not_busy { ui.label("Folder is busy"); }
             });
-        };
+        });
         
-        let is_logged_in = session.is_some();
-        let is_cache_refreshable = is_cache_loaded && is_logged_in;
-        ui.add_enabled_ui(is_cache_refreshable, |ui| {
+        ui.add_enabled_ui(is_cache_loaded && is_not_busy && is_logged_in, |ui| {
             let res = ui.button("Refresh cache from api");
             if res.clicked() {
                 if let Some(session) = session {
@@ -77,20 +85,26 @@ fn render_folder_controls(
                     });
                 }
             }
-
             res.on_disabled_hover_ui(|ui| {
-                if !is_cache_loaded { ui.label("Cache is unloaded"); }
-                if !is_logged_in    { ui.label("Not logged in"); }
+                if !is_cache_loaded   { ui.label("Cache is unloaded"); }
+                else if !is_not_busy  { ui.label("Folder is busy"); }
+                else if !is_logged_in { ui.label("Not logged in"); }
             });
         });
 
-        if ui.button("Execute changes").clicked() {
-            let folder = folder.clone();
-            tokio::spawn(async move {
-                folder.execute_file_changes().await;
-                folder.update_file_intents().await
+        ui.add_enabled_ui(is_not_busy, |ui| {
+            let res = ui.button("Execute changes");
+            if res.clicked() {
+                let folder = folder.clone();
+                tokio::spawn(async move {
+                    folder.execute_file_changes().await;
+                    folder.update_file_intents().await
+                });
+            };
+            res.on_disabled_hover_ui(|ui| {
+                if !is_not_busy { ui.label("Folder is busy"); }
             });
-        };
+        });
 
         ui.toggle_value(&mut gui.is_show_series_search, "Search series");
         ui.add_enabled_ui(is_cache_loaded, |ui| {
@@ -156,8 +170,6 @@ pub fn render_app_folder(
     ui: &mut egui::Ui, session: Option<&Arc<LoginSession>>,
     gui: &mut GuiAppFolder, folder: &Arc<AppFolder>,
 ) {
-    let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
-
     tokio::spawn({
         let folder = folder.clone();
         async move {
@@ -168,9 +180,7 @@ pub fn render_app_folder(
     egui::TopBottomPanel::top("folder_controls")
         .resizable(false)
         .show_inside(ui, |ui| {
-            ui.add_enabled_ui(is_not_busy, |ui| {
-                render_folder_controls(ui, session, gui, folder);
-            });
+            render_folder_controls(ui, session, gui, folder);
         });
     
     egui::SidePanel::right("folder_info")

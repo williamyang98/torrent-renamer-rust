@@ -51,6 +51,25 @@ fn render_series_search_list(
         ui.label("Search gave no results");
         return;
     }
+    
+    let folders = app.get_folders().blocking_read();
+    let folder_index = *app.get_selected_folder_index().blocking_read();
+    let folder = match folder_index {
+        None => None,
+        Some(index) => match folders.get(index) {
+            None => None,
+            Some(folder) => Some(folder.clone()),
+        },
+    };
+    drop(folders);
+    let session = app.get_login_session().blocking_read();
+    let is_folder_selected = folder.is_some();
+    let is_logged_in = session.is_some();
+    let is_not_busy = match folder.as_ref() {
+        None => false,
+        Some(folder) => folder.get_busy_lock().try_lock().is_ok(),
+    };
+    let is_series_selectable = is_folder_selected && is_logged_in && is_not_busy;
 
     render_search_bar(ui, &mut gui.searcher);
 
@@ -105,15 +124,37 @@ fn render_series_search_list(
                                 ui.label(label);
                             });
                             row.col(|ui| {
-                                if ui.button("Select").clicked() {
-                                    tokio::spawn({
-                                        let entry_id = entry.id;
-                                        let app = app.clone();
-                                        async move {
-                                            app.set_series_to_current_folder(entry_id).await
-                                        }
+                                ui.add_enabled_ui(is_series_selectable, |ui| {
+                                    let res = ui.button("Select");
+                                    if res.clicked() {
+                                        tokio::spawn({
+                                            let series_id = entry.id;
+                                            let folder = folder.clone();
+                                            let session = session.clone();
+                                            async move {
+                                                if let Some(folder) = folder {
+                                                    if let Some(session) = session {
+                                                        folder.load_cache_from_api(session, series_id).await?;
+                                                        tokio::join!(
+                                                            folder.update_file_intents(),
+                                                            folder.save_cache_to_file(),
+                                                        );
+                                                        Some(())
+                                                    } else {
+                                                        None
+                                                    }
+                                                } else {
+                                                    None
+                                                }
+                                            }
+                                        });
+                                    }
+                                    res.on_disabled_hover_ui(|ui| {
+                                        if !is_logged_in            { ui.label("Not logged in"); }
+                                        else if !is_folder_selected { ui.label("No folder is selected"); }
+                                        else if !is_not_busy        { ui.label("Folder is busy"); }
                                     });
-                                }
+                                });
                             });
                         });
 

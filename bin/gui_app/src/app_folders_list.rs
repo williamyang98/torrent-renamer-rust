@@ -73,7 +73,8 @@ pub fn render_folders_list(
 
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!is_busy, |ui| {
-            if ui.button("Refresh all").clicked() {
+            let res = ui.button("Refresh all");
+            if res.clicked() {
                 tokio::spawn({
                     let app = app.clone();
                     async move {
@@ -81,7 +82,12 @@ pub fn render_folders_list(
                     }
                 });
             }
-            if ui.button("Reload structure").clicked() {
+            res.on_disabled_hover_ui(|ui| {
+                ui.label("Folders are busy");
+            });
+            
+            let res = ui.button("Reload structure");
+            if res.clicked() {
                 tokio::spawn({
                     let app = app.clone();
                     async move {
@@ -89,6 +95,9 @@ pub fn render_folders_list(
                     }
                 });
             }
+            res.on_disabled_hover_ui(|ui| {
+                ui.label("Folders are busy");
+            });
         });
 
         if ui.button("Login").clicked() {
