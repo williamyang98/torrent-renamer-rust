@@ -2,7 +2,7 @@ use egui;
 use tvdb::models::{Series, Episode};
 use open as cross_open;
 
-const IMDB_PREFIX: &'static str = "https://www.imdb.com/title";
+const IMDB_PREFIX: &str = "https://www.imdb.com/title";
 
 pub fn render_series_table(ui: &mut egui::Ui, series: &Series) {
     let layout = egui::Layout::left_to_right(egui::Align::Min)

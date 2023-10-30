@@ -56,10 +56,7 @@ fn render_series_search_list(
     let folder_index = *app.get_selected_folder_index().blocking_read();
     let folder = match folder_index {
         None => None,
-        Some(index) => match folders.get(index) {
-            None => None,
-            Some(folder) => Some(folder.clone()),
-        },
+        Some(index) => folders.get(index).cloned(),
     };
     drop(folders);
     let session = app.get_login_session().blocking_read();
