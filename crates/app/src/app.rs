@@ -14,7 +14,8 @@ use thiserror;
 pub struct Credentials {
     #[serde(rename="credentials")]
     pub login_info: tvdb::api::LoginInfo,     
-    pub token: String,
+    // TODO: Reuse tokens if possible to avoid login requests on startup
+    pub token: Option<String>,
 }
 
 #[derive(Debug, thiserror::Error)]
