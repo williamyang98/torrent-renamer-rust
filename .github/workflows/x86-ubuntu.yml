@@ -39,11 +39,8 @@ jobs:
       shell: bash
       run: cargo build -r
 
-    - name: Tar files
-      run: tar -cvf torrent_renamer_rust_ubuntu_x64.tar ${{github.workspace}}/target/release
-
     - name: Upload files (Release) 
       uses: actions/upload-artifact@v3
       with:
         name: torrent_renamer_rust_ubuntu_x64
-        path: ${{github.workspace}}/torrent_renamer_rust_ubuntu_x64.tar
+        path: ${{github.workspace}}/target/release/gui_app
