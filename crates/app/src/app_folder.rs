@@ -496,9 +496,12 @@ impl AppFolder {
                 errors.push(message);
             };
         }
+
+        // Automatically delete empty folders
+        self.delete_empty_folders().await;
     }
 
-    pub async fn delete_empty_folders(&self) {
+    async fn delete_empty_folders(&self) {
         let mut tasks = Vec::new();
 
         let walker = walkdir::WalkDir::new(self.folder_path.as_str())
