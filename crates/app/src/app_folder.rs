@@ -497,12 +497,14 @@ impl AppFolder {
             }
         }
         
-        let mut errors = self.errors.write().await;
-        for res in futures::future::join_all(tasks).await.into_iter() {
-            if let Err(err) = res {
-                let message = format!("IO error while executing file changes: {}", err);
-                errors.push(message);
-            };
+        {
+            let mut errors = self.errors.write().await;
+            for res in futures::future::join_all(tasks).await.into_iter() {
+                if let Err(err) = res {
+                    let message = format!("IO error while executing file changes: {}", err);
+                    errors.push(message);
+                };
+            }
         }
 
         // Automatically delete empty folders
