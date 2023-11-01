@@ -62,7 +62,8 @@ fn render_folder_controls(
             if res.clicked() {
                 let folder = folder.clone();
                 tokio::spawn(async move {
-                    folder.load_cache_from_file().await
+                    folder.load_cache_from_file().await?;
+                    folder.update_file_intents().await
                 });
             };
             res.on_disabled_hover_ui(|ui| {
@@ -79,7 +80,10 @@ fn render_folder_controls(
                         let session = session.clone();
                         async move {
                             folder.refresh_cache_from_api(session).await?;
-                            folder.save_cache_to_file().await?;
+                            tokio::join!(
+                                folder.update_file_intents(),
+                                folder.save_cache_to_file(),
+                            );
                             Some(())
                         }
                     });
@@ -105,6 +109,13 @@ fn render_folder_controls(
                 if !is_not_busy { ui.label("Folder is busy"); }
             });
         });
+
+        if ui.button("Load bookmarks").clicked() {
+            let folder = folder.clone();
+            tokio::spawn(async move {
+                folder.load_bookmarks_from_file().await
+            });
+        }
 
         ui.toggle_value(&mut gui.is_show_series_search, "Search series");
         ui.add_enabled_ui(is_cache_loaded, |ui| {
