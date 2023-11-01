@@ -80,11 +80,19 @@ impl AppFolder {
         let folder_name = match path::Path::new(folder_path).strip_prefix(root_path) {
             Ok(name) => name.to_string_lossy().to_string(), 
             Err(_) => folder_path.to_string(),
+        }.replace(std::path::MAIN_SEPARATOR, "/");
+
+        let get_filepath = |filename: &str| -> String {
+            path::Path::new(folder_path)
+                .join(filename)
+                .to_string_lossy()
+                .to_string()
+                .replace(std::path::MAIN_SEPARATOR, "/")
         };
 
-        let series_path = path::Path::new(folder_path).join(PATH_STR_SERIES_DATA).to_string_lossy().to_string();
-        let episodes_path = path::Path::new(folder_path).join(PATH_STR_EPISODES_DATA).to_string_lossy().to_string();
-        let bookmarks_path = path::Path::new(folder_path).join(PATH_STR_BOOKMARKS).to_string_lossy().to_string();
+        let series_path = get_filepath(PATH_STR_SERIES_DATA);
+        let episodes_path = get_filepath(PATH_STR_EPISODES_DATA);
+        let bookmarks_path = get_filepath(PATH_STR_BOOKMARKS);
 
         Self {
             folder_path: folder_path.to_string(),
@@ -134,10 +142,10 @@ async fn recursive_search_file_intents(root_path: &str, curr_folder: &str, cache
             if let Some(rel_path) = rel_path.to_str() {
                 let intent = get_file_intent(rel_path, rules, cache);
                 let app_file = AppFile::new(
-                    rel_path,
+                    rel_path.to_string().replace(std::path::MAIN_SEPARATOR, "/"),
                     intent.descriptor,
                     intent.action,
-                    intent.dest.as_str(),
+                    intent.dest.replace(std::path::MAIN_SEPARATOR, "/"),
                 );
                 intents.push(app_file);
             }

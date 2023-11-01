@@ -38,12 +38,12 @@ pub(crate) enum FileChange {
 }
 
 impl AppFile {
-    pub(crate) fn new(src: &str, src_descriptor: Option<EpisodeKey>, action: Action, dest: &str) -> Self {
+    pub(crate) fn new(src: String, src_descriptor: Option<EpisodeKey>, action: Action, dest: String) -> Self {
         Self {
-            src: src.to_string(),
+            src,
             src_descriptor,
             action,
-            dest: dest.to_string(),
+            dest,
             is_enabled: false,
         }
     }
