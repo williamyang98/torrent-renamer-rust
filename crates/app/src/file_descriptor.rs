@@ -1,5 +1,6 @@
 use regex::Regex;
 use lazy_static::lazy_static;
+use crate::transliterate::transliterate;
 
 #[derive(Debug)]
 pub struct FileDescriptor {
@@ -70,6 +71,7 @@ pub fn clean_episode_title(value: &str) -> String {
 
     let mut new_value: String = REMOVE_REGEX.replace_all(value, "").to_string();
     new_value = REMOVE_TAGS.replace_all(new_value.as_str(), "").to_string();
+    new_value = transliterate(new_value.as_str());
     new_value = REPLACE_REGEX.replace_all(new_value.as_str(), " ").to_string();
     new_value = new_value.trim().replace(' ', ".").to_string();
     new_value

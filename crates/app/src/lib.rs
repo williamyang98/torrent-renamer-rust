@@ -5,4 +5,5 @@ pub mod tvdb_cache;
 pub mod bookmarks;
 pub mod file_descriptor;
 pub mod file_intent;
+pub mod transliterate;
 
