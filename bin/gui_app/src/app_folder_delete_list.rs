@@ -34,34 +34,35 @@ pub fn render_files_delete_list(
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {
-            for index in 0..files.get_total_items() {
-                let action = files.get_action(index);
+            let mut files_iter = files.to_iter();
+            while let Some(mut file) = files_iter.next_mut() {
+                let action = file.get_action();
                 if action != Action::Delete {
                     continue;
                 }
 
-                if !searcher.search(files.get_src(index)) {
+                if !searcher.search(file.get_src()) {
                     continue;
                 }
 
                 ui.horizontal(|ui| {
-                    let mut is_enabled = files.get_is_enabled(index);
+                    let mut is_enabled = file.get_is_enabled();
                     ui.add_enabled_ui(is_not_busy, |ui| {
                         if ui.checkbox(&mut is_enabled, "").clicked() {
-                            files.set_is_enabled(is_enabled, index);
+                            file.set_is_enabled(is_enabled);
                         }
                     });
                     if is_select_all {
-                        files.set_is_enabled(true, index);
+                        file.set_is_enabled(true);
                     }
                     if is_deselect_all {
-                        files.set_is_enabled(false, index);
+                        file.set_is_enabled(false);
                     }
 
                     let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
                     ui.with_layout(layout, |ui| {
-                        let src = files.get_src(index);
-                        let descriptor = files.get_src_descriptor(index);
+                        let src = file.get_src();
+                        let descriptor = file.get_src_descriptor();
                         let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
                         let elem = ClippedSelectableLabel::new(is_selected, src);
                         let res = ui.add(elem);
@@ -73,10 +74,10 @@ pub fn render_files_delete_list(
                             }
                         }
                         if is_not_busy && res.hovered() {
-                            check_file_shortcuts(ui, &mut files, index);
+                            check_file_shortcuts(ui, &mut file);
                         }
                         res.context_menu(|ui| {
-                            render_file_context_menu(ui, folder.get_folder_path(), &mut files, index, is_not_busy);
+                            render_file_context_menu(ui, folder.get_folder_path(), &mut file, is_not_busy);
                         });
                     });
 

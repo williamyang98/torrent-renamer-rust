@@ -11,7 +11,7 @@ use tvdb::models::{Episode, Series};
 use walkdir;
 use crate::app_file::{
     AppFile, FileChange, 
-    AppFileMutableContext, AppFileImmutableContext, 
+    MutableAppFileList, ImmutableAppFileList, 
     FileTracker, 
     flush_file_changes_acquired,
 };
@@ -188,7 +188,8 @@ impl AppFolder {
             return FolderStatus::Unknown; 
         }
 
-        let action_count = &self.file_tracker.blocking_read().action_count;
+        let file_tracker = self.file_tracker.blocking_read();
+        let action_count = file_tracker.get_action_count();
         let file_count = Action::iterator()
             .map(|action| action_count[*action])
             .reduce(|acc, v| acc + v);
@@ -295,16 +296,18 @@ impl AppFolder {
             // seed conflict table
             for (index, file) in file_list.iter().enumerate() {
                 file_tracker.insert_existing_source(file.src.as_str(), index);
-                file_tracker.action_count[file.action] += 1usize;
+                let action_count = file_tracker.get_action_count_mut();
+                action_count[file.action] += 1usize;
             }
         }
 
         {
             // automatically enable renames
             let mut files = self.get_mut_files().await;
-            for i in 0..files.get_total_items() {
-                if files.get_action(i) == Action::Rename {
-                    files.set_is_enabled(true, i); 
+            let mut files_iter = files.to_iter();
+            while let Some(mut file) = files_iter.next_mut() {
+                if file.get_action() == Action::Rename {
+                    file.set_is_enabled(true);
                 }
             }
         }
@@ -467,13 +470,13 @@ impl AppFolder {
         let mut tasks = Vec::<F>::new();
         {
             let files = self.get_files().await;
-            for i in 0..files.get_total_items() {
-                if !files.get_is_enabled(i) {
+            for file in files.to_iter() {
+                if !file.get_is_enabled() {
                     continue;
                 }
 
-                if files.get_action(i) == Action::Delete {
-                    let src = path::Path::new(&self.folder_path).join(files.get_src(i));
+                if file.get_action() == Action::Delete {
+                    let src = path::Path::new(&self.folder_path).join(file.get_src());
                     tasks.push(Box::pin({
                         async move {
                             tokio::fs::remove_file(src).await
@@ -482,10 +485,10 @@ impl AppFolder {
                     continue;
                 }
 
-                if files.get_action(i) == Action::Rename && !files.get_is_conflict(i) {
+                if file.get_action() == Action::Rename && !file.get_is_conflict() {
                     tasks.push(Box::pin({
-                        let src = path::Path::new(&self.folder_path).join(files.get_src(i));
-                        let dest = path::Path::new(&self.folder_path).join(files.get_dest(i));
+                        let src = path::Path::new(&self.folder_path).join(file.get_src());
+                        let dest = path::Path::new(&self.folder_path).join(file.get_dest());
                         async move {
                             let parent_dir = dest.parent().expect("Invalid filepath");
                             tokio::fs::create_dir_all(parent_dir).await?;
@@ -578,46 +581,43 @@ impl AppFolder {
         &self.bookmarks
     }
 
-    pub async fn get_files(&self) -> AppFileImmutableContext {
+    pub async fn get_files(&self) -> ImmutableAppFileList {
         let file_list = self.file_list.read().await;
         let file_tracker = self.file_tracker.read().await;
-        AppFileImmutableContext {
-            file_list,
-            file_tracker,
-        }
+        ImmutableAppFileList::new(file_list, file_tracker)
     }
 
-    pub async fn get_mut_files(&self) -> AppFileMutableContext {
+    pub async fn get_mut_files(&self) -> MutableAppFileList {
         let file_list = self.file_list.read().await;
         let file_tracker = self.file_tracker.read().await;
         let change_queue = self.change_queue.write().await;
-        AppFileMutableContext { file_list, file_tracker, change_queue }
+        MutableAppFileList::new(file_list, file_tracker, change_queue)
     }
     
-    pub fn get_files_blocking(&self) -> AppFileImmutableContext {
+    pub fn get_files_blocking(&self) -> ImmutableAppFileList {
         let file_list = self.file_list.blocking_read();
         let file_tracker = self.file_tracker.blocking_read();
-        AppFileImmutableContext { file_list, file_tracker }
+        ImmutableAppFileList::new(file_list, file_tracker)
     }
 
-    pub fn get_mut_files_blocking(&self) -> AppFileMutableContext {
+    pub fn get_mut_files_blocking(&self) -> MutableAppFileList {
         let file_list = self.file_list.blocking_read();
         let file_tracker = self.file_tracker.blocking_read();
         let change_queue = self.change_queue.blocking_write();
-        AppFileMutableContext { file_list, file_tracker, change_queue }
+        MutableAppFileList::new(file_list, file_tracker, change_queue)
     }
     
-    pub fn get_files_try_blocking(&self) -> Option<AppFileImmutableContext> {
+    pub fn get_files_try_blocking(&self) -> Option<ImmutableAppFileList> {
         let file_list = self.file_list.try_read().ok()?;
         let file_tracker = self.file_tracker.try_read().ok()?;
-        Some(AppFileImmutableContext { file_list, file_tracker })
+        Some(ImmutableAppFileList::new(file_list, file_tracker))
     }
 
-    pub fn get_mut_files_try_blocking(&self) -> Option<AppFileMutableContext> {
+    pub fn get_mut_files_try_blocking(&self) -> Option<MutableAppFileList> {
         let file_list = self.file_list.try_read().ok()?;
         let file_tracker = self.file_tracker.try_read().ok()?;
         let change_queue = self.change_queue.try_write().ok()?;
-        Some(AppFileMutableContext { file_list, file_tracker, change_queue })
+        Some(MutableAppFileList::new(file_list, file_tracker, change_queue))
     }
 
     pub async fn flush_file_changes(&self) -> usize {

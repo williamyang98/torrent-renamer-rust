@@ -14,18 +14,7 @@ pub(crate) struct AppFile {
 pub struct FileTracker {
     pending_writes: HashMap<String, HashSet<usize>>,
     existing_sources: HashMap<String, usize>,
-    pub(crate) action_count: enum_map::EnumMap<Action, usize>,
-}
-
-pub struct AppFileImmutableContext<'a> {
-    pub(crate) file_list: RwLockReadGuard<'a, Vec<AppFile>>,
-    pub(crate) file_tracker: RwLockReadGuard<'a, FileTracker>,
-}
-
-pub struct AppFileMutableContext<'a> {
-    pub(crate) file_list: RwLockReadGuard<'a, Vec<AppFile>>,
-    pub(crate) file_tracker: RwLockReadGuard<'a, FileTracker>,
-    pub(crate) change_queue: RwLockWriteGuard<'a, Vec<FileChange>>,
+    action_count: enum_map::EnumMap<Action, usize>,
 }
 
 // We queue all our changes to our files so we can iterate over them while submitting changes
@@ -35,6 +24,42 @@ pub(crate) enum FileChange {
     SetAction(usize, Action),
     IsEnabled(usize, bool),
     Destination(usize, String),
+}
+
+pub struct ImmutableAppFileList<'a> {
+    file_list: RwLockReadGuard<'a, Vec<AppFile>>,
+    file_tracker: RwLockReadGuard<'a, FileTracker>,
+}
+
+pub struct MutableAppFileList<'a> {
+    file_list: RwLockReadGuard<'a, Vec<AppFile>>,
+    file_tracker: RwLockReadGuard<'a, FileTracker>,
+    change_queue: RwLockWriteGuard<'a, Vec<FileChange>>,
+}
+
+pub struct MutableAppFile<'a> {
+    index: usize,
+    file: &'a AppFile,
+    change_queue: &'a mut Vec<FileChange>,
+    file_tracker: &'a FileTracker,
+}
+
+pub struct MutableAppFileIterator<'a> {
+    index: usize,
+    file_list: &'a [AppFile],
+    change_queue: &'a mut Vec<FileChange>,
+    file_tracker: &'a FileTracker,
+}
+
+pub struct ImmutableAppFile<'a> {
+    file: &'a AppFile,
+    file_tracker: &'a FileTracker,
+}
+
+pub struct ImmutableAppFileIterator<'a> {
+    index: usize,
+    file_list: &'a [AppFile],
+    file_tracker: &'a FileTracker,
 }
 
 impl AppFile {
@@ -110,6 +135,10 @@ impl FileTracker {
 
     pub fn get_action_count(&self) -> &enum_map::EnumMap<Action, usize> {
         &self.action_count
+    }
+
+    pub fn get_action_count_mut(&mut self) -> &mut enum_map::EnumMap<Action, usize> {
+        &mut self.action_count
     }
 }
 
@@ -212,73 +241,161 @@ pub(crate) fn flush_file_changes_acquired(
     total_changes
 }
 
-macro_rules! generate_app_file_context_getters {
+impl<'a> MutableAppFileList<'a> {
+    pub(crate) fn new(
+        file_list: RwLockReadGuard<'a, Vec<AppFile>>,
+        file_tracker: RwLockReadGuard<'a, FileTracker>,
+        change_queue: RwLockWriteGuard<'a, Vec<FileChange>>,
+    ) -> Self {
+        Self { file_list, file_tracker, change_queue }
+    }
+
+    pub fn get(&mut self, index: usize) -> Option<MutableAppFile<'_>> {
+        let file = self.file_list.get(index)?;
+        Some(MutableAppFile { 
+            file, 
+            index, 
+            change_queue: &mut self.change_queue,
+            file_tracker: &self.file_tracker,
+        })
+    }
+
+    pub fn to_iter(&mut self) -> MutableAppFileIterator<'_> {
+        MutableAppFileIterator {
+            index: 0,
+            change_queue: &mut self.change_queue,
+            file_tracker: &self.file_tracker,
+            file_list: self.file_list.as_slice(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.file_list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.file_list.len() == 0
+    }
+}
+
+impl<'a> ImmutableAppFileList<'a> {
+    pub(crate) fn new(
+        file_list: RwLockReadGuard<'a, Vec<AppFile>>,
+        file_tracker: RwLockReadGuard<'a, FileTracker>,
+    ) -> Self {
+        Self { file_list, file_tracker }
+    }
+
+    pub fn get(&self, index: usize) -> Option<ImmutableAppFile<'_>> {
+        let file = self.file_list.get(index)?;
+        Some(ImmutableAppFile { 
+            file, 
+            file_tracker: &self.file_tracker,
+        })
+    }
+
+    pub fn to_iter(&self) -> ImmutableAppFileIterator<'_> {
+        ImmutableAppFileIterator {
+            index: 0,
+            file_tracker: &self.file_tracker,
+            file_list: self.file_list.as_slice(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.file_list.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.file_list.len() == 0
+    }
+}
+
+// Streaming iterator which allows only one mutable reference to a file at a time
+impl MutableAppFileIterator<'_> {
+    pub fn next_mut(&mut self) -> Option<MutableAppFile<'_>> {
+        let file = self.file_list.get(self.index)?;
+        let index = self.index;
+        self.index += 1;
+        Some(MutableAppFile {
+            file,
+            index,
+            change_queue: self.change_queue,
+            file_tracker: self.file_tracker,
+        })
+    }
+}
+
+impl<'a> std::iter::Iterator for ImmutableAppFileIterator<'a> {
+    type Item = ImmutableAppFile<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let file = self.file_list.get(self.index)?;
+        self.index += 1;
+        Some(ImmutableAppFile {
+            file,
+            file_tracker: self.file_tracker,
+        })
+    }
+}
+
+macro_rules! generate_app_file_getters {
     ($name: ident) => {
         impl $name<'_> {
-            pub fn get_src(&self, index: usize) -> &str {
-                self.file_list[index].src.as_str() 
+            pub fn get_src(&self) -> &str {
+                self.file.src.as_str()
             }
 
-            pub fn get_src_descriptor(&self, index: usize) -> &Option<EpisodeKey> {
-                &self.file_list[index].src_descriptor
+            pub fn get_src_descriptor(&self) -> &Option<EpisodeKey> {
+                &self.file.src_descriptor
             }
 
-            pub fn get_action(&self, index: usize) -> Action {
-                self.file_list[index].action
+            pub fn get_action(&self) -> Action {
+                self.file.action
             }
 
-            pub fn get_dest(&self, index: usize) -> &str {
-                self.file_list[index].dest.as_str()
+            pub fn get_dest(&self) -> &str {
+                self.file.dest.as_str()
             }
 
-            pub fn get_is_enabled(&self, index: usize) -> bool {
-                self.file_list[index].is_enabled
+            pub fn get_is_enabled(&self) -> bool {
+                self.file.is_enabled
             }
 
-            pub fn get_is_conflict(&self, index: usize) -> bool {
-                let file = &self.file_list[index];
+            pub fn get_is_conflict(&self) -> bool {
+                let file = &self.file;
                 if !file.is_enabled || file.action != Action::Rename {
                     return false;
                 }
                 self.file_tracker.check_if_write_conflicts(file.dest.as_str())
             }
-
-            pub fn get_total_items(&self) -> usize {
-                self.file_list.len()
-            }
-
-            pub fn is_empty(&self) -> bool {
-                self.file_list.len() == 0
-            }
         }
     }
 }
 
-generate_app_file_context_getters!(AppFileMutableContext);
-generate_app_file_context_getters!(AppFileImmutableContext);
+generate_app_file_getters!(ImmutableAppFile);
+generate_app_file_getters!(MutableAppFile);
 
-impl AppFileMutableContext<'_> {
-    pub fn set_action(&mut self, new_action: Action, index: usize) {
-        self.change_queue.push(FileChange::SetAction(index, new_action));
-        let file = &self.file_list[index];
+impl MutableAppFile<'_> {
+    pub fn set_action(&mut self, new_action: Action) {
+        self.change_queue.push(FileChange::SetAction(self.index, new_action));
         // Automatically set destination to src is not set
-        if file.action != Action::Rename && new_action == Action::Rename && file.dest.is_empty() {
-            self.change_queue.push(FileChange::Destination(index, file.src.to_owned())); 
+        if self.file.action != Action::Rename && new_action == Action::Rename && self.file.dest.is_empty() {
+            self.change_queue.push(FileChange::Destination(self.index, self.file.src.to_owned())); 
         }
         // Automatically disable enabled if we are deleting it
         if new_action == Action::Delete {
-            self.change_queue.push(FileChange::IsEnabled(index, false));
+            self.change_queue.push(FileChange::IsEnabled(self.index, false));
         }
     }
 
-    pub fn set_is_enabled(&mut self, new_is_enabled: bool, index: usize) {
-        let change = FileChange::IsEnabled(index, new_is_enabled);
+    pub fn set_is_enabled(&mut self, new_is_enabled: bool) {
+        let change = FileChange::IsEnabled(self.index, new_is_enabled);
         self.change_queue.push(change);
     }
 
-    pub fn set_dest(&mut self, new_dest: String, index: usize) {
-        let change = FileChange::Destination(index, new_dest);
+    pub fn set_dest(&mut self, new_dest: String) {
+        let change = FileChange::Destination(self.index, new_dest);
         self.change_queue.push(change);
     }
 }
-

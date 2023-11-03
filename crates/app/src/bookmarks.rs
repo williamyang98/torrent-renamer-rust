@@ -60,7 +60,7 @@ pub fn deserialize_bookmarks(data: &str) -> Result<BookmarkTable, serde_json::Er
     let mut table = BookmarkTable::new();
     for bookmark in bookmarks {
         // Automatically convert Window's separators to Unix
-        let id = bookmark.id.replace("\\", "/");
+        let id = bookmark.id.replace('\\', "/");
         table.bookmarks.insert(id, Bookmark {
             is_read: bookmark.is_read.unwrap_or(false),
             is_unread: bookmark.is_unread.unwrap_or(false),

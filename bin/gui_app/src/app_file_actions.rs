@@ -1,4 +1,4 @@
-use app::app_file::AppFileMutableContext;
+use app::app_file::MutableAppFile;
 use app::file_intent::Action;
 use egui;
 use lazy_static::lazy_static;
@@ -16,8 +16,8 @@ lazy_static! {
     };
 }
 
-pub fn check_file_shortcuts(ui: &mut egui::Ui, files: &mut AppFileMutableContext<'_>, index: usize) {
-    let current_action = files.get_action(index);
+pub fn check_file_shortcuts(ui: &mut egui::Ui, file: &mut MutableAppFile<'_>) {
+    let current_action = file.get_action();
     for action in Action::iterator() {
         let action = *action;
         if action == current_action {
@@ -25,19 +25,19 @@ pub fn check_file_shortcuts(ui: &mut egui::Ui, files: &mut AppFileMutableContext
         }
         let shortcut = &ACTION_SHORTCUTS[action];
         if ui.input_mut(|i| i.consume_shortcut(shortcut)) {
-            files.set_action(action, index);
+            file.set_action(action);
         }
     }
 }
 
 pub fn render_file_context_menu(
     ui: &mut egui::Ui,
-    folder_path: &str, files: &mut AppFileMutableContext<'_>, index: usize, is_not_busy: bool,
+    folder_path: &str, file: &mut MutableAppFile<'_>, is_not_busy: bool,
 ) {
-    let current_action = files.get_action(index);
+    let current_action = file.get_action();
     if ui.button("Open file").clicked() {
         tokio::spawn({
-            let src = files.get_src(index);
+            let src = file.get_src();
             let filename_path = Path::new(folder_path).join(src);
             let filename_path_str = filename_path.to_string_lossy().to_string();
             async move {
@@ -49,7 +49,7 @@ pub fn render_file_context_menu(
 
     if ui.button("Open folder").clicked() {
         tokio::spawn({
-            let src = files.get_src(index);
+            let src = file.get_src();
             let filename_path = Path::new(folder_path).join(src);
             let folder_path = filename_path.parent().unwrap_or(Path::new("."));
             let folder_path_str = folder_path.to_string_lossy().to_string();
@@ -75,7 +75,7 @@ pub fn render_file_context_menu(
         let button = egui::Button::new(action.to_str())
             .shortcut_text(ui.ctx().format_shortcut(shortcut));
         if ui.add(button).clicked() {
-            files.set_action(action, index);
+            file.set_action(action);
             ui.close_menu();
         }
     }

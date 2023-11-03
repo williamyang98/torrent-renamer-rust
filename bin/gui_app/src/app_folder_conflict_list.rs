@@ -71,24 +71,25 @@ pub fn render_files_conflicts_list(
                 })
                 .body(|mut body| {
                     let mut render_entry = |index: usize| {
-                        let action = files.get_action(index); 
+                        let mut file = files.get(index).expect("Valid index from pending writes list");
+                        let action = file.get_action(); 
                         let mut current_column_widths: [f32;3] = [0.0,0.0,0.0];
                         body.row(row_height, |mut row| {
                             row.col(|ui| {
                                 if action == Action::Rename || action == Action::Delete {
                                     ui.add_enabled_ui(is_not_busy, |ui| {
-                                        let mut is_enabled = files.get_is_enabled(index);
+                                        let mut is_enabled = file.get_is_enabled();
                                         if ui.checkbox(&mut is_enabled, "").clicked() {
-                                            files.set_is_enabled(is_enabled, index);
+                                            file.set_is_enabled(is_enabled);
                                         }
                                     });
                                 }
                                 current_column_widths[0] = ui.available_width();
                             });
                             row.col(|ui| {
-                                let descriptor = files.get_src_descriptor(index);
+                                let descriptor = file.get_src_descriptor();
                                 let is_selected = descriptor.is_some() && *descriptor == selected_descriptor;
-                                let src = files.get_src(index);
+                                let src = file.get_src();
                                 let elem = ClippedSelectableLabel::new(is_selected, src);
                                 let res = ui.add(elem);
                                 if res.clicked() {
@@ -99,21 +100,21 @@ pub fn render_files_conflicts_list(
                                     }
                                 }
                                 if is_not_busy && res.hovered() {
-                                    check_file_shortcuts(ui, &mut files, index);
+                                    check_file_shortcuts(ui, &mut file);
                                 }
                                 res.context_menu(|ui| {
-                                    render_file_context_menu(ui, folder.get_folder_path(), &mut files, index, is_not_busy);
+                                    render_file_context_menu(ui, folder.get_folder_path(), &mut file, is_not_busy);
                                 });
                                 current_column_widths[1] = ui.available_width();
                             });
                             row.col(|ui| {
                                 if action == Action::Rename {
                                     ui.add_enabled_ui(is_not_busy, |ui| {
-                                        let mut dest_edit_buffer = files.get_dest(index).to_string();
+                                        let mut dest_edit_buffer = file.get_dest().to_string();
                                         let elem = egui::TextEdit::singleline(&mut dest_edit_buffer);
                                         let res = ui.add_sized(ui.available_size(), elem);
                                         if res.changed() {
-                                            files.set_dest(dest_edit_buffer, index);
+                                            file.set_dest(dest_edit_buffer);
                                         }
                                     });
                                 }
