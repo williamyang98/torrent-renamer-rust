@@ -183,12 +183,39 @@ impl AppFolder {
         res_0.or(res_1)
     }
 
-    pub fn get_folder_status(&self) -> FolderStatus {
+    pub fn get_folder_status_blocking(&self) -> FolderStatus {
         if !*self.is_file_count_init.blocking_lock() {
             return FolderStatus::Unknown; 
         }
 
         let file_tracker = self.file_tracker.blocking_read();
+        let action_count = file_tracker.get_action_count();
+        let file_count = Action::iterator()
+            .map(|action| action_count[*action])
+            .reduce(|acc, v| acc + v);
+        let file_count = match file_count {
+            Some(count) => count,
+            None => return FolderStatus::Unknown,
+        };
+        
+        if file_count == 0 {
+            return FolderStatus::Empty;
+        }
+
+        let pending_count = action_count[Action::Delete] + action_count[Action::Rename];
+        if pending_count > 0 {
+            return FolderStatus::Pending;
+        }
+
+        FolderStatus::Done
+    }
+
+    pub async fn get_folder_status(&self) -> FolderStatus {
+        if !*self.is_file_count_init.lock().await {
+            return FolderStatus::Unknown; 
+        }
+
+        let file_tracker = self.file_tracker.read().await;
         let action_count = file_tracker.get_action_count();
         let file_count = Action::iterator()
             .map(|action| action_count[*action])

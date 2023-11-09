@@ -222,22 +222,16 @@ impl App {
         // Allow the folder to be read while it is busy
         // Disallow load_folders(...) while we are performing an update on all folders
         let _busy_lock = self.folders_busy_lock.lock().await;
-        let mut tasks = Vec::new();
         {
             let folders = self.folders.read().await;
             for folder in folders.iter() {
-                let folder = folder.clone();
-                let task = async move {
-                    let res = folder.perform_initial_load().await;
-                    // Initial load already occured, we therefore just rescan the folder
-                    if res.is_none() {
-                        folder.update_file_intents().await;
-                    }
-                };
-                tasks.push(task);
+                let res = folder.perform_initial_load().await;
+                // Initial load already occured, we therefore just rescan the folder
+                if res.is_none() {
+                    folder.update_file_intents().await;
+                }
             }
         }
-        let _ = futures::future::join_all(tasks).await;
         Some(())
     }
 

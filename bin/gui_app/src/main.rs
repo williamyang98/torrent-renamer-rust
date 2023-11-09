@@ -1,5 +1,8 @@
 // disable console when compiling in release
-#![windows_subsystem = "windows"]
+#![cfg_attr(
+    all(not(debug_assertions), target_os = "windows"), 
+    windows_subsystem = "windows"
+)]
 
 use app::app::App;
 use gui_app::app::GuiApp;

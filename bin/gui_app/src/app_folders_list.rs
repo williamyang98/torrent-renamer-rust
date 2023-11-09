@@ -64,7 +64,7 @@ pub fn render_folders_list(
     let mut status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
     let mut total_busy_folders = 0;
     for folder in folders.iter() {
-        let status = folder.get_folder_status();
+        let status = folder.get_folder_status_blocking();
         status_counts[status] += 1; 
         if folder.get_busy_lock().try_lock().is_err() {
             total_busy_folders += 1;
@@ -181,7 +181,7 @@ pub fn render_folders_list(
                     continue;
                 }
 
-                let status = folder.get_folder_status();
+                let status = folder.get_folder_status_blocking();
                 if !gui.filters[status] {
                     continue;
                 }

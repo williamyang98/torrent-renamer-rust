@@ -1,7 +1,9 @@
 use app::app::App;
-use std::sync::Arc;
+use app::app_folder::FolderStatus;
 use eframe;
 use egui;
+use enum_map;
+use std::sync::Arc;
 use tokio;
 use crate::helpers::render_invisible_width_widget;
 use crate::error_list::render_errors_list;
@@ -17,7 +19,7 @@ pub struct GuiApp {
     pub(crate) gui_series_search: GuiSeriesSearch,
     gui_settings: GuiSettings,
 
-    is_folder_busy_check_thread_spawned: bool,
+    is_force_refresh_thread_spawned: bool,
     is_gui_settings_opened: bool,
 }
 
@@ -29,43 +31,66 @@ impl GuiApp {
             gui_app_folder: GuiAppFolder::new(),
             gui_series_search: GuiSeriesSearch::new(),
             gui_settings: GuiSettings::new(),
-            is_folder_busy_check_thread_spawned: false,
+            is_force_refresh_thread_spawned: false,
             is_gui_settings_opened: false,
         }
+    }
+}
+
+impl GuiApp {
+    // Create a thread that refreshes ui when folders are updated
+    fn setup_force_refresh_thread(&mut self, ctx: &egui::Context) {
+        if self.is_force_refresh_thread_spawned {
+            return;
+        }
+
+        self.is_force_refresh_thread_spawned = true;
+        let ctx = ctx.clone();
+        let app = self.app.clone();
+        tokio::spawn(async move {
+            let mut old_busy_count = None;
+            let mut old_status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
+            let mut new_status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
+            loop {
+                let folders = app.get_folders().read().await;
+                let mut new_busy_count = 0;
+                for status in FolderStatus::iterator() {
+                    new_status_counts[*status] = 0;
+                }
+                for folder in folders.iter() {
+                    if folder.get_busy_lock().try_lock().is_err() {
+                        new_busy_count += 1;
+                    }
+                    let status = folder.get_folder_status().await;
+                    new_status_counts[status] += 1;
+                }
+                drop(folders);
+
+                // detect when folders have changed
+                let mut is_refresh = old_busy_count != Some(new_busy_count);
+                for status in FolderStatus::iterator() {
+                    if old_status_counts[*status] != new_status_counts[*status] {
+                        is_refresh = true;
+                    }
+                    old_status_counts[*status] = new_status_counts[*status];
+                }
+                old_busy_count = Some(new_busy_count);
+
+                // cap maximum refresh rate at 10fps in background
+                if is_refresh {
+                    ctx.request_repaint();
+                }
+                let duration = tokio::time::Duration::from_millis(100);
+                tokio::time::sleep(duration).await;
+            }
+        });
     }
 }
 
 impl eframe::App for GuiApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.gui_settings.update_frame(ctx, frame);
-
-        // Create a thread that refreshes ui when folders are updated
-        if !self.is_folder_busy_check_thread_spawned {
-            self.is_folder_busy_check_thread_spawned = true;
-            let ctx = ctx.clone();
-            let app = self.app.clone();
-            tokio::spawn(async move {
-                let mut old_busy_count = None;
-                loop {
-                    let folders = app.get_folders().read().await;
-                    let mut total_busy_folders = 0;
-                    for folder in folders.iter() {
-                        if folder.get_busy_lock().try_lock().is_err() {
-                            total_busy_folders += 1;
-                        }
-                    }
-                    drop(folders);
-
-                    let is_refresh = old_busy_count != Some(total_busy_folders);
-                    old_busy_count = Some(total_busy_folders);
-                    if is_refresh {
-                        ctx.request_repaint();
-                    }
-                    let duration = tokio::time::Duration::from_millis(100);
-                    tokio::time::sleep(duration).await;
-                }
-            });
-        }
+        self.setup_force_refresh_thread(ctx);
 
         egui::SidePanel::left("Folders")
             .resizable(true)
