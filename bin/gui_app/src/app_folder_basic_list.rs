@@ -17,12 +17,12 @@ pub fn render_files_basic_list(
     let mut bookmarks = folder.get_bookmarks().blocking_write();
     let mut is_bookmarks_changed = false;
 
+    render_search_bar(ui, searcher);
+
     if file_tracker.get_action_count()[selected_action] == 0 {
         ui.heading(format!("No {}s", selected_action.to_str().to_lowercase()));
         return;
     }
-
-    render_search_bar(ui, searcher);
 
     let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();

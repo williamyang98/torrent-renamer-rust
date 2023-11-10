@@ -7,6 +7,8 @@ use crate::fuzzy_search::{FuzzySearcher, render_search_bar};
 use crate::clipped_selectable::ClippedSelectableLabel;
 
 pub fn render_episode_cache_list(ui: &mut egui::Ui, searcher: &mut FuzzySearcher, folder: &Arc<AppFolder>) {
+    render_search_bar(ui, searcher);
+
     let cache = folder.get_cache().blocking_read();
     let cache = match cache.as_ref() {
         Some(cache) => cache,
@@ -21,8 +23,6 @@ pub fn render_episode_cache_list(ui: &mut egui::Ui, searcher: &mut FuzzySearcher
         ui.label("No episodes available");
         return;
     }
-
-    render_search_bar(ui, searcher);
     
     // Create a string that we can search for each episode
     let mut episode_name = String::new();

@@ -33,6 +33,8 @@ fn render_series_search_list(
     ui: &mut egui::Ui,
     gui: &mut GuiSeriesSearch, app: &Arc<App>,
 ) {
+    render_search_bar(ui, &mut gui.searcher);
+
     if app.get_series_busy_lock().try_lock().is_err() {
         ui.spinner();
         return;
@@ -67,8 +69,6 @@ fn render_series_search_list(
         Some(folder) => folder.get_busy_lock().try_lock().is_ok(),
     };
     let is_series_selectable = is_folder_selected && is_logged_in && is_not_busy;
-
-    render_search_bar(ui, &mut gui.searcher);
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);

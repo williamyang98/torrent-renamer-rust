@@ -45,32 +45,19 @@ fn render_folder_status(ui: &mut egui::Ui, status: FolderStatus, is_busy: bool) 
         let elem = egui::Label::new(icon);
         ui.add_sized(size, elem);
     } else {
-        // let icon = egui::RichText::new("↻").strong().size(height);
-        // let elem = egui::Label::new(icon);
+        let icon = egui::RichText::new("↻").strong().size(height);
+        let elem = egui::Label::new(icon);
         // The spinner forces a ui refresh which could be unnecessarily expensive
         // But it looks cool so I'm keeping it
-        let elem = egui::Spinner::new();
+        // let elem = egui::Spinner::new();
         ui.add_sized(size, elem);
     }
 }
 
-pub fn render_folders_list(
-    ui: &mut egui::Ui,
-    gui: &mut GuiAppFoldersList, app: &Arc<App>, is_show_settings: &mut bool,
+fn render_folders_controls(
+    ui: &mut egui::Ui, app: &Arc<App>,
+    is_show_settings: &mut bool, is_busy: bool
 ) {
-    let folders = app.get_folders().blocking_read();
-    let is_busy = app.get_folders_busy_lock().try_lock().is_err();
-    let total_folders = folders.len();
-    let mut status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
-    let mut total_busy_folders = 0;
-    for folder in folders.iter() {
-        let status = folder.get_folder_status_blocking();
-        status_counts[status] += 1; 
-        if folder.get_busy_lock().try_lock().is_err() {
-            total_busy_folders += 1;
-        }
-    }
-
     ui.horizontal(|ui| {
         ui.add_enabled_ui(!is_busy, |ui| {
             let res = ui.button("Refresh all");
@@ -85,7 +72,7 @@ pub fn render_folders_list(
             res.on_disabled_hover_ui(|ui| {
                 ui.label("Folders are busy");
             });
-            
+
             let res = ui.button("Reload structure");
             if res.clicked() {
                 tokio::spawn({
@@ -126,28 +113,22 @@ pub fn render_folders_list(
             *is_show_settings = !*is_show_settings;
         }
     });
+}
 
-    if folders.is_empty() {
-        if is_busy {
-            ui.spinner();
-        } else {
-            ui.label("No folders");
-        }
-        return;
-    }
+fn render_folders_progress_bar(ui: &mut egui::Ui, total_finished: usize, total_folders: usize) {
+    let total_progress: f32 = total_finished as f32 / total_folders as f32;
+    let elem = egui::ProgressBar::new(total_progress)
+        .text(format!("{}/{}", total_finished, total_folders))
+        .desired_width(ui.available_width())
+        .desired_height(ui.spacing().interact_size.y);
+    ui.add(elem);
+}
 
-    {
-        let total_finished = total_folders - total_busy_folders;
-        let progress: f32 = total_finished as f32 / total_folders as f32;
-        let elem = egui::ProgressBar::new(progress)
-            .text(format!("{}/{}", total_finished, total_folders))
-            .desired_width(ui.available_width())
-            .desired_height(ui.spacing().interact_size.y);
-        ui.add(elem);
-    }
-
-    ui.separator();
-
+fn render_folders_status_filter(
+    ui: &mut egui::Ui,
+    status_counts: &enum_map::EnumMap<FolderStatus, usize>,
+    filters: &mut enum_map::EnumMap<FolderStatus, bool>,
+) {
     let layout = egui::Layout::left_to_right(egui::Align::Min)
         .with_main_justify(true)
         .with_main_wrap(true);
@@ -159,7 +140,7 @@ pub fn render_folders_list(
             .show(ui, |ui| {
                 for (index, status) in FolderStatus::iterator().enumerate() {
                     let status = *status;
-                    let flag = &mut gui.filters[status];
+                    let flag = &mut filters[status];
                     let checkbox = egui::Checkbox::new(flag, format!("{} ({})", status.to_str(), status_counts[status]));
                     ui.add(checkbox);
                     if (index + 1) % total_columns == 0 {
@@ -168,9 +149,35 @@ pub fn render_folders_list(
                 }
             });
     });
+}
 
+pub fn render_folders_list(
+    ui: &mut egui::Ui,
+    gui: &mut GuiAppFoldersList, app: &Arc<App>, is_show_settings: &mut bool,
+) {
+    let folders = app.get_folders().blocking_read();
+    let is_busy = app.get_folders_busy_lock().try_lock().is_err();
+    let mut status_counts: enum_map::EnumMap<FolderStatus, usize> = enum_map::enum_map! { _ => 0 };
+    for folder in folders.iter() {
+        let status = folder.get_folder_status_blocking();
+        status_counts[status] += 1; 
+    }
+
+    render_folders_controls(ui, app, is_show_settings, is_busy);
+    render_folders_progress_bar(ui, status_counts[FolderStatus::Done], folders.len());
+    ui.separator();
+    render_folders_status_filter(ui, &status_counts, &mut gui.filters);
     render_search_bar(ui, &mut gui.searcher);
-    
+
+    if folders.is_empty() {
+        if is_busy {
+            ui.spinner();
+        } else {
+            ui.label("No folders");
+        }
+        return;
+    }
+ 
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
         ui.with_layout(layout, |ui| {

@@ -11,12 +11,6 @@ pub fn render_files_delete_list(
     searcher: &mut FuzzySearcher, folder: &Arc<AppFolder>,
 ) {
     let file_tracker = folder.get_file_tracker().blocking_read();
-    let mut files = folder.get_mut_files_blocking(); 
-    if file_tracker.get_action_count()[Action::Delete] == 0 {
-        ui.heading(format!("No {}s", Action::Delete.to_str().to_lowercase()));
-        return;
-    }
-
     let is_not_busy = folder.get_busy_lock().try_lock().is_ok();
     let selected_descriptor = *folder.get_selected_descriptor().blocking_read();
 
@@ -30,6 +24,12 @@ pub fn render_files_delete_list(
     });
 
     render_search_bar(ui, searcher);
+
+    let mut files = folder.get_mut_files_blocking(); 
+    if file_tracker.get_action_count()[Action::Delete] == 0 {
+        ui.heading(format!("No {}s", Action::Delete.to_str().to_lowercase()));
+        return;
+    }
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         let layout = egui::Layout::top_down(egui::Align::Min).with_cross_justify(true);
