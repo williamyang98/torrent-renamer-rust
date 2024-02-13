@@ -1,6 +1,6 @@
 # Introduction
-[![x86-windows](https://github.com/FiendChain/torrent-renamer-rust/actions/workflows/x86-windows.yml/badge.svg)](https://github.com/FiendChain/torrent-renamer-rust/actions/workflows/x86-windows.yml)
-[![x86-ubuntu](https://github.com/FiendChain/torrent-renamer-rust/actions/workflows/x86-ubuntu.yml/badge.svg)](https://github.com/FiendChain/torrent-renamer-rust/actions/workflows/x86-ubuntu.yml)
+[![x86-windows](https://github.com/williamyang98/torrent-renamer-rust/actions/workflows/x86-windows.yml/badge.svg)](https://github.com/williamyang98/torrent-renamer-rust/actions/workflows/x86-windows.yml)
+[![x86-ubuntu](https://github.com/williamyang98/torrent-renamer-rust/actions/workflows/x86-ubuntu.yml/badge.svg)](https://github.com/williamyang98/torrent-renamer-rust/actions/workflows/x86-ubuntu.yml)
 
 A torrent renaming tool built in rust
 - Uses TVDB database for renaming files with correct names
@@ -27,5 +27,5 @@ You can check out the [tvdb dashboard](https://thetvdb.com/dashboard) for your a
 3. ```cargo run -r```.
 
 ## C++ version
-The original C++ version of this application can be found [here](https://github.com/FiendChain/TorrentRenamerCpp). 
+The original C++ version of this application can be found [here](https://github.com/williamyang98/TorrentRenamerCpp). 
 Significant improvements were made using reqwests and tokio::fs for better IO when using network attached storage.
